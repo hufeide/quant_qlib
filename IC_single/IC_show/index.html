@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Alpha 因子验证报告 — IMIN10</title>
+<style>
+  :root {
+    --bg:#0f1420; --panel:#171e2e; --panel2:#1d2536; --line:#2a3346;
+    --txt:#e6ebf2; --mut:#8a96ad; --acc:#4ea1ff; --good:#37c98b; --warn:#f0b429; --bad:#ff6b6b;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg); color:var(--txt); line-height:1.6; }
+  header { padding:28px 36px; background:linear-gradient(135deg,#16203a,#0f1420);
+    border-bottom:1px solid var(--line); }
+  header h1 { margin:0 0 6px; font-size:22px; }
+  header .meta { color:var(--mut); font-size:13px; }
+  header code { background:#0c111c; padding:2px 8px; border-radius:5px; color:#9ed0ff; }
+  .layout { display:flex; }
+  nav { width:210px; flex:none; position:sticky; top:0; align-self:flex-start; height:100vh;
+    overflow:auto; border-right:1px solid var(--line); padding:18px 10px; background:var(--panel); }
+  nav h3 { font-size:12px; color:var(--mut); margin:8px 10px; text-transform:uppercase; letter-spacing:1px; }
+  nav ul { list-style:none; margin:0; padding:0; }
+  nav a { display:block; padding:8px 12px; color:var(--mut); text-decoration:none; border-radius:7px;
+    font-size:14px; }
+  nav a:hover { background:var(--panel2); color:var(--txt); }
+  main { flex:1; padding:28px 36px 80px; min-width:0; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:22px 26px; margin-bottom:26px; }
+  section h2 { margin:0 0 12px; font-size:18px; border-left:3px solid var(--acc); padding-left:10px; }
+  p { color:#cdd6e4; font-size:14px; margin:8px 0 16px; }
+  .cards { display:flex; flex-wrap:wrap; gap:12px; margin:14px 0; }
+  .card { background:var(--panel2); border:1px solid var(--line); border-radius:10px;
+    padding:12px 16px; min-width:120px; }
+  .card-v { font-size:20px; font-weight:700; }
+  .card-l { font-size:12px; color:var(--mut); margin-top:4px; }
+  .c-good .card-v { color:var(--good); }
+  .c-warn .card-v { color:var(--warn); }
+  .c-bad .card-v { color:var(--bad); }
+  .sub { font-size:13px; color:var(--mut); margin:18px 0 8px; font-weight:600; }
+  .expr { margin:12px 0; }
+  .tbl { overflow-x:auto; margin:10px 0; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th,td { padding:7px 12px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--mut); font-weight:600; background:var(--panel2); position:sticky; top:0; }
+  td:first-child, th:first-child { text-align:left; }
+  tr.hl td { background:rgba(78,161,255,.10); }
+  .note, .muted { color:var(--mut); font-size:13px; }
+  .fig { margin:16px 0; }
+  .fig img { max-width:100%; border:1px solid var(--line); border-radius:8px; background:#0c111c; }
+  .cap { font-size:12px; color:var(--mut); margin-top:6px; }
+  .gradebox { display:inline-block; padding:14px 22px; border-radius:10px; margin:6px 0 16px;
+    font-size:15px; border:1px solid var(--line); }
+  .gradebox .g { font-size:30px; font-weight:800; margin-left:8px; }
+  .gA { background:rgba(55,201,139,.12); } .gA .g { color:var(--good); }
+  .gB { background:rgba(78,161,255,.12); } .gB .g { color:var(--acc); }
+  .gC { background:rgba(240,180,41,.12); } .gC .g { color:var(--warn); }
+  .gD { background:rgba(255,107,107,.12); } .gD .g { color:var(--bad); }
+  tr.imp td { background:rgba(78,161,255,.10); font-weight:600; }
+  tr.final td { background:rgba(240,180,41,.12); font-weight:600; }
+  .raw.three { display:flex; gap:14px; flex-wrap:wrap; }
+  .raw > div { flex:1; min-width:240px; background:var(--panel2); border:1px solid var(--line);
+    border-radius:8px; padding:8px 10px; }
+  .raw-h { font-size:12px; color:var(--acc); margin-bottom:4px; }
+  pre { margin:0; font-size:11px; color:var(--mut); white-space:pre-wrap; word-break:break-all; }
+  @media (max-width:760px) { nav { display:none; } main { padding:16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Alpha 因子验证报告 — IMIN10</h1>
+  <div class="meta">表达式 <code>IdxMin($low, 10)/10</code> ｜ 分析区间 2010-01-01 ~ 2026-06-30 ｜ 股票池 csi300 ｜ 基准 SH000300 ｜ 综合等级 <b style="color:var(--acc)">B</b></div>
+</header>
+<div class="layout">
+  <nav>
+    <h3>步骤导航</h3>
+    <ul><li><a href="#ic0">Step 0</a></li><li><a href="#ic1">Step 1</a></li><li><a href="#ic2">Step 2</a></li><li><a href="#ic3">Step 3</a></li><li><a href="#ic4">Step 4</a></li><li><a href="#ic5">Step 5</a></li><li><a href="#ic6">Step 6</a></li><li><a href="#ic7">Step 7</a></li><li><a href="#ic8">Step 8</a></li><li><a href="#ic9">Step 9</a></li><li><a href="#ic10">Step 10</a></li></ul>
+  </nav>
+  <main>
+    <section id="ic0">
+      <h2>Step 0 · 数据加载</h2>
+      <p>选定 Alpha158 中<b>中间一个因子</b>作为研究对象，加载其因子值、未来 1 日收益、基准收益及控制变量（Size/Beta/Mom/Vol/Liq/MKT），主分析区间切片保存以便复核。</p>
+      <div class="cards"><div class="card"><div class="card-v">IMIN10</div><div class="card-l">因子名称</div></div><div class="card"><div class="card-v">158</div><div class="card-l">Alpha158 总数</div></div><div class="card"><div class="card-v">79</div><div class="card-l">选中序号</div></div><div class="card"><div class="card-v">2010-01-01 ~ 2026-06-30</div><div class="card-l">分析区间</div></div></div><div class="expr">表达式：<code>IdxMin($low, 10)/10</code></div><div class="sub">落盘原始数据（预览前 2 行）</div><div class="raw three"><div><div class="raw-h">raw_factor.csv</div><pre>,datetime,instrument,FACTOR
+0,2010-01-04,SH600000,0.3
+1,2010-01-05,SH600000,0.2</pre></div><div><div class="raw-h">raw_fwd1.csv</div><pre>,datetime,instrument,fwd1
+0,2010-01-04,SH600000,0.0075776577
+1,2010-01-05,SH600000,-0.019650698</pre></div><div><div class="raw-h">raw_controls.csv</div><pre>,datetime,instrument,SIZE,BETA,MOM,VOL,LIQ
+0,2010-01-04,SH600000,16.456419,-0.00438952,0.094842315,0.0403514,1.1154513
+1,2010-01-05,SH600000,17.01761,-0.003195763,0.078238726,0.035860613,0.6393575</pre></div></div>
+    </section>
+    <section id="ic1">
+      <h2>Step 1 · 第一层：IC</h2>
+      <p>最基础的关系检验：每天横截面计算 <b>Rank IC</b>（因子与未来收益排名相关）与 <b>Pearson IC</b>，并统计 <b>ICIR</b>（信息比率）、<b>IC t 值</b>（统计显著性）与 <b>IC&gt;0 比例</b>（胜率）。</p>
+      <div class="cards"><div class="card" class="c-good"><div class="card-v">+0.0114</div><div class="card-l">Rank IC</div></div><div class="card" class="c-good"><div class="card-v">+0.0021</div><div class="card-l">Pearson IC</div></div><div class="card" class="c-good"><div class="card-v">+0.076</div><div class="card-l">ICIR</div></div><div class="card"><div class="card-v">+4.94</div><div class="card-l">IC t 值</div></div><div class="card"><div class="card-v">+52.71%</div><div class="card-l">IC > 0 比例</div></div><div class="card"><div class="card-v">4246</div><div class="card-l">样本天数</div></div></div><div class="sub">日度 IC 核心指标</div><div class="tbl"><table><thead><tr><th>RankIC</th><th>RankIC_std</th><th>ICIR</th><th>IC_t</th><th>P_IC_gt_0</th><th>Pearson_IC</th><th>N_days</th></tr></thead><tbody><tr><td>0.011374822226664284</td><td>0.14994068025043097</td><td>0.07586214900229912</td><td>4.943279150037444</td><td>0.5270843146490815</td><td>0.00209829010497474</td><td>4246</td></tr></tbody></table></div><div class="fig"><img src="assets/step1_ic_cumsum.png"/><div class="cap">Rank IC / Pearson IC 日度累计</div></div><div class="fig"><img src="assets/step1_rankic_hist.png"/><div class="cap">Rank IC 分布直方图</div></div>
+    </section>
+    <section id="ic2">
+      <h2>Step 2 · 第二层：分组收益</h2>
+      <p>将股票按因子值从低到高分成 <b>Q1~Q10</b>，计算各组未来收益。直接观察“因子值越高，未来收益是否越高”。并计算 <b>单调性</b> Corr(组序号, 组收益)。</p>
+      <div class="cards"><div class="card" class="c-good"><div class="card-v">+0.7690</div><div class="card-l">单调性</div></div><div class="card"><div class="card-v">+11.10%</div><div class="card-l">Q10 年化</div></div><div class="card"><div class="card-v">+6.02%</div><div class="card-l">Q1 年化</div></div><div class="card"><div class="card-v">+5.08%</div><div class="card-l">多空 LS 年化</div></div></div><div class="sub">各组年化收益</div><div class="tbl"><table><thead><tr><th>ann_return</th></tr></thead><tbody><tr><td>0.06018228334445706</td></tr><tr><td>0.09319491120672606</td></tr><tr><td>0.07989886104023672</td></tr><tr><td>0.09907370772637834</td></tr><tr><td>0.11154323943738402</td></tr><tr><td>0.09739123110565376</td></tr><tr><td>0.09571533643159254</td></tr><tr><td>0.09814297122650599</td></tr><tr><td>0.12279477191329702</td></tr><tr><td>0.1110046835840504</td></tr><tr><td>0.05082240023959333</td></tr></tbody></table></div><div class="fig"><img src="assets/step2_group_nav_h1.png"/><div class="cap">分组净值曲线 Q1~Q10</div></div><div class="fig"><img src="assets/step2_group_ann_return_h1.png"/><div class="cap">各组年化收益柱状图</div></div>
+    </section>
+    <section id="ic3">
+      <h2>Step 3 · 第三层：多空组合</h2>
+      <p>把统计关系变成投资组合：<b>Long(Q10) − Short(Q1)</b>。观察年化收益、Sharpe、最大回撤等绩效，这是最接近“真实 Alpha”的一步。</p>
+      <div class="cards"><div class="card" class="c-good"><div class="card-v">+3.72%</div><div class="card-l">年化收益</div></div><div class="card"><div class="card-v">+16.92%</div><div class="card-l">年化波动</div></div><div class="card" class="c-good"><div class="card-v">+0.30</div><div class="card-l">Sharpe</div></div><div class="card"><div class="card-v">-42.09%</div><div class="card-l">最大回撤</div></div><div class="card"><div class="card-v">-0.12</div><div class="card-l">信息比率</div></div><div class="card"><div class="card-v">+85.06%</div><div class="card-l">累计收益</div></div></div><div class="sub">多空组合绩效指标</div><div class="tbl"><table><thead><tr><th>horizon</th><th>qlib_annualized_return</th><th>qlib_max_drawdown</th><th>ann_return</th><th>ann_vol</th><th>sharpe</th><th>max_drawdown</th><th>information_ratio</th></tr></thead><tbody><tr><td>1</td><td>0.04799893355961592</td><td>-0.4494114492940753</td><td>0.03720488895410101</td><td>0.1691913533233892</td><td>0.3003841463603187</td><td>-0.4208520155276375</td><td>-0.12075633531389841</td></tr></tbody></table></div><div class="fig"><img src="assets/step3_longshort_nav_h1.png"/><div class="cap">多空组合净值 Q10−Q1</div></div>
+    </section>
+    <section id="ic4">
+      <h2>Step 4 · 第四层：中性化</h2>
+      <p>检验因子是否只是“暴露了常见风险因子”（如市值、Beta、动量等）。对因子做中性化后再算 IC：若中性化后 IC 仍显著，说明因子有<b>独立性</b>。</p>
+      <div class="tbl"><table><thead><tr><th>neutralization</th><th>RankIC</th></tr></thead><tbody><tr><td>raw</td><td>0.011374822226664284</td></tr><tr><td>size</td><td>0.010254298064276034</td></tr><tr><td>size+beta+mom+vol+liq+mkt</td><td>0.0053618795629618785</td></tr><tr><td>industry</td><td></td></tr></tbody></table></div><div class="note">原始 IC 与全控制中性后 IC 的差距越小，说明因子越独立于常见风险因子。本例行业中性因缺少行业标签标记为 N/A。</div>
+    </section>
+    <section id="ic5">
+      <h2>Step 5 · 第五层：样本外 OOS</h2>
+      <p>判断 Alpha 真假的核心。将区间切分为 Train(IS)/Valid/Test(OOS) 三段；并做 <b>Walk-forward</b>（前 6 年训练 → 后 1 年测试），看样本外 IC 是否稳定存在。</p>
+      <div class="cards"><div class="card" class="c-good"><div class="card-v">+0.0027</div><div class="card-l">OOS RankIC (Test)</div></div><div class="card" class="c-good"><div class="card-v">+0.016</div><div class="card-l">OOS ICIR</div></div><div class="card"><div class="card-v">+0.0147</div><div class="card-l">IS RankIC (Train)</div></div><div class="card"><div class="card-v">+0.0123</div><div class="card-l">Valid RankIC</div></div></div><div class="sub">三段切分 IC</div><div class="tbl"><table><thead><tr><th>split</th><th>start</th><th>end</th><th>N_days</th><th>RankIC</th><th>PearsonIC</th><th>ICIR</th><th>IC_t</th><th>P_IC_gt_0</th></tr></thead><tbody><tr><td>Train(IS)</td><td>2010-01-01</td><td>2018-12-31</td><td>2187</td><td>0.014662533380094914</td><td>0.005265608909479014</td><td>0.10325206061682903</td><td>4.828621004312294</td><td>0.5326931870141747</td></tr><tr><td>Valid</td><td>2019-01-01</td><td>2021-12-31</td><td>730</td><td>0.012260758050566046</td><td>0.0014583078223372858</td><td>0.08583258991620864</td><td>2.319068875423615</td><td>0.5328767123287671</td></tr><tr><td>Test(OOS)</td><td>2022-01-01</td><td>2026-06-30</td><td>1085</td><td>0.002711562119214275</td><td>-0.005329149076472942</td><td>0.015533022953674888</td><td>0.5116474960909505</td><td>0.5152073732718894</td></tr></tbody></table></div><div class="sub">Walk-forward 逐年样本外 Rank IC</div><div class="tbl"><table><thead><tr><th>train</th><th>test</th><th>N_days</th><th>RankIC</th><th>ICIR</th><th>IC_t</th></tr></thead><tbody><tr><td>2010-01-01~2015-12-31</td><td>2016-01-01~2016-12-31</td><td>244</td><td>0.01892097871676248</td><td>0.15052680472815624</td><td>2.3513038556866928</td></tr><tr><td>2011-01-01~2016-12-31</td><td>2017-01-01~2017-12-31</td><td>244</td><td>0.01762145351962361</td><td>0.11197487040741963</td><td>1.7491033906184776</td></tr><tr><td>2012-01-01~2017-12-31</td><td>2018-01-01~2018-12-31</td><td>243</td><td>0.0014862430287727586</td><td>0.00993833135448305</td><td>0.15492325363577517</td></tr><tr><td>2013-01-01~2018-12-31</td><td>2019-01-01~2019-12-31</td><td>244</td><td>0.01738433911009624</td><td>0.1380578628582123</td><td>2.156532757289436</td></tr><tr><td>2014-01-01~2019-12-31</td><td>2020-01-01~2020-12-31</td><td>243</td><td>0.01274696842589333</td><td>0.09028037239933161</td><td>1.4073317272969315</td></tr><tr><td>2015-01-01~2020-12-31</td><td>2021-01-01~2021-12-31</td><td>243</td><td>0.006629881919990339</td><td>0.041476093723229274</td><td>0.6465483146530954</td></tr><tr><td>2016-01-01~2021-12-31</td><td>2022-01-01~2022-12-31</td><td>242</td><td>0.008491205820263473</td><td>0.051622878426873575</td><td>0.8030635228002427</td></tr><tr><td>2017-01-01~2022-12-31</td><td>2023-01-01~2023-12-31</td><td>242</td><td>0.0005647040051759433</td><td>0.003666199586983203</td><td>0.05703268096106114</td></tr><tr><td>2018-01-01~2023-12-31</td><td>2024-01-01~2024-12-31</td><td>242</td><td>-0.00037203280960576134</td><td>-0.0018317600023695668</td><td>-0.028495498221999756</td></tr><tr><td>2019-01-01~2024-12-31</td><td>2025-01-01~2025-12-31</td><td>243</td><td>0.010999561681742043</td><td>0.06465560440986982</td><td>1.00788112648772</td></tr></tbody></table></div><div class="fig"><img src="assets/step5_walkforward_ic.png"/><div class="cap">Walk-forward 样本外 Rank IC</div></div>
+    </section>
+    <section id="ic6">
+      <h2>Step 6 · 第六层：稳定性（逐年 IC）</h2>
+      <p>真正的 Alpha 应在不同年份稳定为正。逐年统计 Rank IC、ICIR、IC&gt;0 比例。</p>
+      <div class="tbl"><table><thead><tr><th>year</th><th>N_days</th><th>RankIC</th><th>PearsonIC</th><th>ICIR</th><th>IC_t</th><th>P_IC_gt_0</th></tr></thead><tbody><tr><td>2009</td><td>244</td><td>0.01777924752413227</td><td>0.008651701386717482</td><td>0.15188478869567498</td><td>2.3725162433710922</td><td>0.5122950819672131</td></tr><tr><td>2010</td><td>242</td><td>0.01689067861777109</td><td>0.0005651192731321501</td><td>0.12059002843708529</td><td>1.8759405907295152</td><td>0.5206611570247934</td></tr><tr><td>2011</td><td>244</td><td>-0.0029266232756905313</td><td>-0.008578408731245175</td><td>-0.023230126927016915</td><td>-0.3628661826060086</td><td>0.4713114754098361</td></tr><tr><td>2012</td><td>243</td><td>0.012754835017835047</td><td>0.010935433555262138</td><td>0.0954329784818346</td><td>1.487652907033484</td><td>0.522633744855967</td></tr><tr><td>2013</td><td>238</td><td>0.02661662199239773</td><td>0.010949273695655197</td><td>0.1976589791275693</td><td>3.049334213083437</td><td>0.5588235294117647</td></tr><tr><td>2014</td><td>245</td><td>0.021765288656526705</td><td>0.002745458456153034</td><td>0.1696179390509686</td><td>2.654940693449674</td><td>0.6</td></tr><tr><td>2015</td><td>244</td><td>0.01905461135242564</td><td>0.020174465849321758</td><td>0.10909539789624052</td><td>1.7041245921240402</td><td>0.5614754098360656</td></tr><tr><td>2016</td><td>244</td><td>0.01892097871676248</td><td>0.01092812476301898</td><td>0.15052680472815624</td><td>2.3513038556866928</td><td>0.5368852459016393</td></tr><tr><td>2017</td><td>244</td><td>0.01762145351962361</td><td>-0.0007551761903138248</td><td>0.11197487040741963</td><td>1.7491033906184776</td><td>0.5532786885245902</td></tr><tr><td>2018</td><td>243</td><td>0.0014862430287727586</td><td>0.0005416280540318784</td><td>0.00993833135448305</td><td>0.15492325363577517</td><td>0.4691358024691358</td></tr><tr><td>2019</td><td>244</td><td>0.01738433911009624</td><td>0.005890517697798491</td><td>0.1380578628582123</td><td>2.156532757289436</td><td>0.5368852459016393</td></tr><tr><td>2020</td><td>243</td><td>0.01274696842589333</td><td>-0.002123376070170931</td><td>0.09028037239933161</td><td>1.4073317272969315</td><td>0.551440329218107</td></tr><tr><td>2021</td><td>243</td><td>0.006629881919990339</td><td>0.0005895422925717022</td><td>0.041476093723229274</td><td>0.6465483146530954</td><td>0.5102880658436214</td></tr><tr><td>2022</td><td>242</td><td>0.008491205820263473</td><td>0.005536187810938419</td><td>0.051622878426873575</td><td>0.8030635228002427</td><td>0.5289256198347108</td></tr><tr><td>2023</td><td>242</td><td>0.0005647040051759433</td><td>-0.006559472774845858</td><td>0.003666199586983203</td><td>0.05703268096106114</td><td>0.5413223140495868</td></tr><tr><td>2024</td><td>242</td><td>-0.00037203280960576134</td><td>-0.0064032206215575175</td><td>-0.0018317600023695668</td><td>-0.028495498221999756</td><td>0.5</td></tr><tr><td>2025</td><td>243</td><td>0.010999561681742043</td><td>-0.002789902438218047</td><td>0.06465560440986982</td><td>1.00788112648772</td><td>0.5020576131687243</td></tr><tr><td>2026</td><td>116</td><td>-0.01579609333747908</td><td>-0.02850832848106584</td><td>-0.08710183258957499</td><td>-0.9381154469966008</td><td>0.49137931034482757</td></tr></tbody></table></div><div class="fig"><img src="assets/step6_yearly_ic.png"/><div class="cap">逐年 Rank IC</div></div>
+    </section>
+    <section id="ic7">
+      <h2>Step 7 · IC 衰减分析</h2>
+      <p>因子对未来 1/2/3/5/10/20 日的预测力衰减情况，决定调仓频率与策略容量。</p>
+      <div class="tbl"><table><thead><tr><th>horizon</th><th>RankIC</th><th>Pearson_IC</th><th>ICIR</th><th>IC_t</th><th>P_IC_gt_0</th><th>N_days</th></tr></thead><tbody><tr><td>1</td><td>0.011374822226664284</td><td>0.00209829010497474</td><td>0.07586214900229912</td><td>4.943279150037444</td><td>0.5270843146490815</td><td>4246</td></tr><tr><td>2</td><td>0.012992916239237751</td><td>0.005506955194936495</td><td>0.08841571812600497</td><td>5.760608036815582</td><td>0.5352179034157832</td><td>4245</td></tr><tr><td>3</td><td>0.013293761593488813</td><td>0.006665821696031554</td><td>0.09062777757796192</td><td>5.904036282717947</td><td>0.5374646559849199</td><td>4244</td></tr><tr><td>5</td><td>0.011551803573986568</td><td>0.004815885464568438</td><td>0.07902872797275404</td><td>5.147191469379606</td><td>0.5332390381895332</td><td>4242</td></tr><tr><td>10</td><td>0.005852459273144035</td><td>0.0006420515114563659</td><td>0.04049867727005581</td><td>2.636149711314678</td><td>0.5133349067736606</td><td>4237</td></tr><tr><td>20</td><td>0.007481028132945154</td><td>0.0027782016128167068</td><td>0.053520091372692244</td><td>3.479629227827038</td><td>0.5031937544357701</td><td>4227</td></tr></tbody></table></div><div class="fig"><img src="assets/step7_decay_ic.png"/><div class="cap">IC 随预测周期衰减</div></div>
+    </section>
+    <section id="ic8">
+      <h2>Step 8 · IC 的条件依赖（市场环境）</h2>
+      <p>把市场按趋势（牛/熊/震荡）、波动（高/低）、成交额（高/低）分样本，分别计算 IC，找出“Alpha 在什么市场环境下有效”。</p>
+      <div class="tbl"><table><thead><tr><th>regime_type</th><th>state</th><th>N_days</th><th>RankIC</th><th>PearsonIC</th><th>ICIR</th></tr></thead><tbody><tr><td>trend(bull/bear/osc)</td><td>bear</td><td>775</td><td>0.004451351485909198</td><td>0.007909067027949471</td><td>0.02842709557680548</td></tr><tr><td>trend(bull/bear/osc)</td><td>bull</td><td>945</td><td>0.017848089324457146</td><td>0.00038518130406251617</td><td>0.12243742504989927</td></tr><tr><td>trend(bull/bear/osc)</td><td>oscillation</td><td>2526</td><td>0.011077297450999573</td><td>0.0009563802481088008</td><td>0.07416967215116432</td></tr><tr><td>vol(high/low)</td><td>high_vol</td><td>2114</td><td>0.012241691324286468</td><td>0.004811515701611377</td><td>0.08106446388249633</td></tr><tr><td>vol(high/low)</td><td>low_vol</td><td>2132</td><td>0.010515271911292194</td><td>-0.0005920283337165592</td><td>0.07061901029893115</td></tr><tr><td>amount(high/low)</td><td>high_vol</td><td>2114</td><td>0.010429129741944473</td><td>0.002207902711186594</td><td>0.06386757082473432</td></tr><tr><td>amount(high/low)</td><td>low_vol</td><td>2132</td><td>0.012312530440875205</td><td>0.001989602933524524</td><td>0.09090784616976759</td></tr></tbody></table></div><div class="fig"><img src="assets/step8_regime_ic.png"/><div class="cap">不同市场趋势下的 Rank IC</div></div>
+    </section>
+    <section id="ic9">
+      <h2>Step 9 · 交易成本</h2>
+      <p>从“因子有效”到“策略有效”的关键：净收益 = 毛收益 − 换手率 × 成本。统计平均换手率，并在多档双边成本下计算净年化、净 Sharpe、净回撤。</p>
+      <div class="cards"><div class="card" class="c-warn"><div class="card-v">+44.21%</div><div class="card-l">平均换手率</div></div><div class="card"><div class="card-v">+3.72%</div><div class="card-l">毛年化</div></div><div class="card" class="c-bad"><div class="card-v">-25.74%</div><div class="card-l">净年化(0.3%)</div></div></div><div class="sub">不同成本情景</div><div class="tbl"><table><thead><tr><th>cost_roundtrip</th><th>turnover_avg</th><th>gross_ann_return</th><th>net_ann_return</th><th>net_sharpe</th><th>net_max_drawdown</th></tr></thead><tbody><tr><td>0.001</td><td>0.442146984496097</td><td>0.03720488895410101</td><td>-0.07207424377003457</td><td>-0.357027946732983</td><td>-0.8079137913414596</td></tr><tr><td>0.003</td><td>0.442146984496097</td><td>0.03720488895410101</td><td>-0.2574288941973816</td><td>-1.666748653845487</td><td>-0.9938222224474085</td></tr><tr><td>0.005</td><td>0.442146984496097</td><td>0.03720488895410101</td><td>-0.4058912074388913</td><td>-2.9668453324695143</td><td>-0.9998550105727044</td></tr><tr><td>0.01</td><td>0.442146984496097</td><td>0.03720488895410101</td><td>-0.6601708972889551</td><td>-6.1540424101189535</td><td>-0.9999999879650864</td></tr></tbody></table></div>
+    </section>
+    <section id="ic10">
+      <h2>Step 10 · Alpha Scorecard</h2>
+      <p>综合所有维度形成一张评分卡，并给出因子等级（A/B/C/D）。这是整套研究的核心结论。</p><div class="gradebox gB">综合等级：<span class="g">B</span></div>
+      <div class="tbl"><table><thead><tr><th>指标</th><th>评价</th><th>类别</th></tr></thead><tbody><tr><td>Rank IC</td><td>0.0114</td><td>核心</td></tr><tr><td>Pearson IC</td><td>0.0021</td><td>辅助</td></tr><tr><td>ICIR</td><td>0.076</td><td>核心</td></tr><tr><td>IC t-value</td><td>4.94</td><td>核心</td></tr><tr><td>IC > 0 比例</td><td>0.527</td><td>核心</td></tr><tr><td>Q1->Q10 单调性</td><td>0.769</td><td>核心</td></tr><tr><td>Q10-Q1 收益(年化)</td><td>0.0372</td><td>核心</td></tr><tr class="imp"><td>OOS RankIC</td><td>0.0027</td><td>**最重要**</td></tr><tr class="imp"><td>OOS ICIR</td><td>0.016</td><td>**最重要**</td></tr><tr><td>IC 衰减(h=1->20)</td><td>0.0114->0.0075</td><td>核心</td></tr><tr><td>不同市场状态 IC(均值)</td><td>0.0111</td><td>稳定性</td></tr><tr><td>行业中性后 IC</td><td>N/A(无标签)</td><td>独立性</td></tr><tr><td>Size 中性后 IC</td><td>0.0103</td><td>独立性</td></tr><tr><td>全控制中性后 IC</td><td>0.0054</td><td>独立性</td></tr><tr><td>Winsorize 后 IC</td><td>同上(原始已去极值)</td><td>鲁棒性</td></tr><tr><td>平均换手率</td><td>0.4421</td><td>交易性</td></tr><tr class="final"><td>成本后净年化(0.3%)</td><td>-0.2574</td><td>**最终**</td></tr></tbody></table></div>
+    </section>
+  </main>
+</div>
+</body>
+</html>
