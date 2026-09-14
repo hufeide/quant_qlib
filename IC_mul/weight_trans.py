@@ -9,7 +9,7 @@
 import csv
 
 SRC = "/home/fei/workspace/qlib/me/IC_mul/results/qlib_data/沪深300成分股权重_2017-2026半年度.csv"
-DST = "/home/fei/.qlib/qlib_data/cn_data/instruments/csi300/weights_day.txt"
+DST = "/home/fei/workspace/qlib/me/IC_mul/data/weights_day.txt"
 
 
 def convert_code(code: str) -> str:
