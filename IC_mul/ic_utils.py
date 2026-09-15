@@ -679,14 +679,17 @@ def load_industry_wide(csv_path, start=None, end=None):
     if not csv_path or not os.path.exists(csv_path):
         return None
     ind = pd.read_csv(csv_path)
+    # 兼容列名 date / datetime
+    if "datetime" not in ind.columns and "date" in ind.columns:
+        ind = ind.rename(columns={"date": "datetime"})
     ind_col = None
-    for c in ("industry", "INDUSTRY", "sector", "SECTOR"):
+    for c in ("industry", "INDUSTRY", "industry_name", "INDUSTRY_NAME", "sector", "SECTOR"):
         if c in ind.columns:
             ind_col = c
             break
     if ind_col is None or "datetime" not in ind.columns or "instrument" not in ind.columns:
         raise ValueError(
-            f"industry.csv 需包含列 datetime, instrument, (industry/INDUSTRY)，实际: {list(ind.columns)}"
+            f"行业 CSV 需包含列 (datetime|date), instrument, (industry|industry_name|sector)，实际: {list(ind.columns)}"
         )
     ind["datetime"] = pd.to_datetime(ind["datetime"])
     wide = ind.pivot(index="datetime", columns="instrument", values=ind_col).sort_index()

@@ -23,8 +23,17 @@ run_ic.py — Alpha158 全因子（158 个）批量 IC 计算与【因子筛选�
   * rank_ic_corr.csv            : 因子×因子 日度 RankIC 相关性表
   * factor_cluster.csv          : 因子 -> 聚类类别
   * neutralized_factors.pkl     : 中性化后的因子长表
-                                  （index=(datetime, instrument)，columns=因子，float32）
-                                  后续分析可直接 pd.read_pickle 复用，无需重算中性化。
+                                  （index=(datetime, instrument)，区间 = [START, ALL_END]，
+                                  columns=158 因子 + 额外因子）。
+                                  158 因子为 float32；另含 NFWD1/NFWD3/NFWD5（中性化未来收益，
+                                  float32）与 INDUSTRY（原始行业标签，object）。后两者不进 IC，
+                                  仅作数据保存/复用。后续分析可直接 pd.read_pickle 复用
+                                  （样本外 [END, ALL_END] 段也已覆盖，可直接拿来训练/回测）。
+  * extra_factors.pkl           : 额外因子长表（与并入 neutralized_factors.pkl 的内容一致）：
+                                  NFWD1 / NFWD3 / NFWD5（未来 1/3/5 日收益的横截面
+                                  中性化残差，float32）+ INDUSTRY（原始行业标签）。
+                                  所有额外因子均按 weights_day.txt 成分股成员关系做 mask。
+  * extra_factors.csv           : 上述额外因子的主区间切片（便于复核）。
 
 复用 Qlib 框架（不再重复造轮子）：
   * qlib.contrib.data.loader.Alpha158DL : 取 158 因子名称与表达式
@@ -44,11 +53,13 @@ run_ic.py — Alpha158 全因子（158 个）批量 IC 计算与【因子筛选�
 """
 
 import os
+from pandas.core.frame import DataFrame
 import sys
 import time
 import argparse
 import logging
 import multiprocessing
+from typing import Any
 
 try:
     multiprocessing.set_start_method("fork")
@@ -68,12 +79,12 @@ import ic_utils as U
 # ----------------------------------------------------------------------------
 # 配置（与 run_ic_analysis.py 保持一致）
 # ----------------------------------------------------------------------------
-RESULTS = os.path.join(HERE, "results", "alpha158_all")
+RESULTS = os.path.join(HERE, "results", "alpha158_all_no")
 
-WARM_START = "2009-01-01"        # 预热（因子计算需要历史）
+WARM_START = "2016-01-01"        # 预热（因子计算需要历史）
 START = "2017-01-01"             # 分析主区间起点
 END = "2024-01-01"               # 分析主区间终点
-TEST_END = "2026-09-01"    
+ALL_END = "2026-09-01"    # 数据上界：中性化 / 复用 pkl 延伸到此（IC 评估只用 START~END）
 N_GROUPS = 5                     # 分组数 Q1..Q5（QH=最高组）
 PRIMARY_H = 3                    # 主分析换仓周期（日）
 
@@ -82,7 +93,17 @@ NEUTRAL_CONTROLS = ["SIZE", "BETA"]
 NEUTRALIZE = True
 # 中性化方式：size / all / industry / industry+size
 NEUTRAL_MODE = "industry+size"
-INDUSTRY_CSV = os.path.join(HERE, "data", "industry.csv")
+INDUSTRY_CSV = os.path.join(HERE, "data", "indus.csv")
+
+# ----- 额外因子（保存但不进入 IC 估计）-----
+# 权重表（成分股成员关系快照，半年度）：用于按成分股做 mask
+WEIGHTS_TXT = os.path.join(HERE, "data", "weights_day.txt")
+# 需额外构造并保存的未来收益周期（日）
+FWD_HORIZONS = [1, 3, 5]
+# 行业分类原始标签（仅保存，不中性化、不进 IC）
+INDUSTRY_RAW_CSV = os.path.join(HERE, "data", "indus.csv")
+# 额外因子落盘文件名（中性化后的未来收益 + 原始行业标签）
+EXTRA_PKL_NAME = "extra_factors.pkl"
 
 # 交易成本（往返成本比例，与 run_ic_analysis.py 的 COST_RATES 同口径）
 COST_RATES = 0.001
@@ -166,6 +187,117 @@ def _fmt(v, spec="+.4f"):
 
 
 # ----------------------------------------------------------------------------
+# 权重表（成分股成员关系）+ 额外因子（未来收益 / 行业标签）
+# ----------------------------------------------------------------------------
+def load_weight_members(txt_path):
+    """读取 weights_day.txt -> (snap_dates, members_by_snap)。
+
+    snap_dates       : 排序后的快照日期列表（Timestamp）
+    members_by_snap  : {快照日期(Timestamp): set(instrument)}，即该快照的成分股集合
+    """
+    w = pd.read_csv(txt_path)
+    # 兼容列名 date / datetime
+    if "datetime" not in w.columns and "date" in w.columns:
+        w = w.rename(columns={"date": "datetime"})
+    if "datetime" not in w.columns or "instrument" not in w.columns:
+        raise ValueError("weights_day.txt 需含 (date|datetime),instrument,weight 列")
+    w["datetime"] = pd.to_datetime(w["datetime"])
+    w["instrument"] = w["instrument"].astype(str)
+    members = {d: set(g["instrument"].values) for d, g in w.groupby("datetime")}
+    snap_dates = sorted(members.keys())
+    return snap_dates, members
+
+
+def _weight_keep_wide(dates_index, insts_index, snap_dates, members_by_snap):
+    """构造 (datetime × instrument) 的 bool 宽表：单元格=True 表示该股在该交易日
+    所属「最近(≤)成分股快照」的成员。
+
+    早于首个快照的交易日回退使用首个快照的成员（避免整段早期数据被清空）；
+    此回退仅用于无历史快照可参照的极少数早期交易日。
+    """
+    snap_arr = pd.DatetimeIndex(snap_dates)
+    first_snap = snap_arr[0]
+    keep_wide = pd.DataFrame(False, index=dates_index, columns=insts_index)
+    for dt in dates_index:
+        pos = snap_arr.searchsorted(dt, side="right") - 1
+        snap = snap_arr[pos] if pos >= 0 else first_snap
+        members = members_by_snap[pd.Timestamp(snap)]
+        cols = [m for m in members if m in insts_index]
+        if cols:
+            keep_wide.loc[dt, cols] = True
+    return keep_wide
+
+
+def mask_by_weights(long_df, snap_dates, members_by_snap):
+    """对 LONG 表（index=(datetime, instrument)）按权重表成分股成员关系做 mask：
+    每个交易日取不晚于该日的最近快照，若 (datetime, instrument) 不在该快照成员中，
+    因子值置 NaN。返回 mask 后的 LONG 表。
+    """
+    if not snap_dates:
+        return long_df
+    idx = long_df.index
+    dates = idx.get_level_values(0)
+    insts = idx.get_level_values(1)
+    keep_wide = _weight_keep_wide(pd.DatetimeIndex(pd.unique(dates)),
+                                  pd.Index(pd.unique(insts)),
+                                  snap_dates, members_by_snap)
+    keep = keep_wide.stack()
+    keep.index = keep.index.reorder_levels([0, 1])
+    keep = keep.reindex(idx)
+    return long_df.where(keep)
+
+
+def build_extra_factors(fwd1_wide, controls_wide, ind_wide, snap_dates, members_by_snap):
+    """构造额外因子（保存但不进 IC）：
+        * NFWD1 / NFWD3 / NFWD5 : 未来 1/3/5 日累计收益，按与 Alpha158 相同的控制变量
+                                  （NEUTRAL_MODE）做横截面中性化后的残差；
+        * INDUSTRY              : 原始行业分类标签（分类变量，原样保存，不做中性化）。
+    均先按权重表成分股成员关系 mask（非成分股置 NaN），再落盘。
+    返回 LONG 表（index=(datetime, instrument)，列=NFWD1/NFWD3/NFWD5/INDUSTRY）。
+    """
+    ctrl_names, use_ind = NEUTRAL_MODE_MAP.get(NEUTRAL_MODE, (["SIZE"], True))
+    if NEUTRAL_MODE == "all":
+        ctrl_names = list(NEUTRAL_CONTROLS)
+    ctrls = {c: controls_wide[c] for c in ctrl_names}
+    ind = ind_wide if use_ind else None
+    dates, insts = fwd1_wide.index, fwd1_wide.columns
+
+    # 成分股 mask 宽表（先 mask 再中性化，使非成分股不进入横截面回归）
+    keep_wide = _weight_keep_wide(dates, insts, snap_dates, members_by_snap)
+
+    raw_wides = {f"NFWD{h}": U.forward_cumprod_ret(fwd1_wide, h) for h in FWD_HORIZONS}
+    raw_wides = {nm: w.where(keep_wide) for nm, w in raw_wides.items()}
+
+    if NEUTRALIZE:
+        neu_wides = _neutralize_batch(raw_wides, dates, insts, list(ctrls), ctrls, ind)
+    else:
+        neu_wides = raw_wides
+
+    cols = {}
+    for nm, w in neu_wides.items():
+        s = w.stack().astype("float32")
+        s.index.names = ["datetime", "instrument"]
+        cols[nm] = s.rename(nm)
+
+    # 行业分类（原始标签，不中性化，但同样 mask 非成分股）
+    # 优先复用 step0 已加载的 ind_wide（与 Alpha 中性化同源），避免重复读盘
+    target = pd.MultiIndex.from_product([dates, insts], names=["datetime", "instrument"])
+    ind_raw = ind_wide if ind_wide is not None else U.load_industry_wide(INDUSTRY_RAW_CSV, WARM_START, END)
+    if ind_raw is not None:
+        ind_long = ind_raw.stack()
+        ind_long.index.names = ["datetime", "instrument"]
+        ind_long = ind_long.reindex(target)
+        keep_long = keep_wide.stack()
+        keep_long.index = keep_long.index.reorder_levels([0, 1])
+        ind_long = ind_long.where(keep_long.reindex(target))
+        cols["INDUSTRY"] = ind_long.rename("INDUSTRY")
+    else:
+        log.warning("  行业标签不可用（ind_wide 与 indus.csv 均缺失），INDUSTRY 列将不保存")
+
+    return pd.concat(cols, axis=1)
+
+
+# ----------------------------------------------------------------------------
 # Step 0: 加载全部 158 个因子 + 未来收益 / 基准 / 控制变量 / 行业标签
 # ----------------------------------------------------------------------------
 def step0_load(names):
@@ -181,29 +313,41 @@ def step0_load(names):
 
     # 一次性批量加载（1 次 DB 查询，远快于逐因子查询）
     t0 = time.time()
-    factor_long = U.load_long(fields, WARM_START, END)
+    factor_long = U.load_long(fields, WARM_START, ALL_END)
     factor_long.columns = names
     factor_long = factor_long.replace([np.inf, -np.inf], np.nan)
     log.info(f"  因子面板: {factor_long.shape}  耗时 {time.time() - t0:.1f}s")
 
-    fwd1_long = U.load_fwd1_long(WARM_START, END)
+    # 权重表（成分股成员关系）加载
+    snap_dates, members_by_snap = load_weight_members(WEIGHTS_TXT)
+    log.info(f"  权重表: {len(snap_dates)} 个快照，"
+             f"{snap_dates[0].date()} ~ {snap_dates[-1].date()}")
+
+    # 按成分股成员关系 mask：非成分股因子值置 NaN（向后看最近快照）
+    n0 = int(factor_long.notna().sum().sum())
+    factor_long = mask_by_weights(factor_long, snap_dates, members_by_snap)
+    n1 = int(factor_long.notna().sum().sum())
+    log.info(f"  权重 mask: 因子有效值 {n0} -> {n1}（剔除非成分股）")
+
+    fwd1_long = U.load_fwd1_long(WARM_START, ALL_END)
     fwd1_wide = U.fwd1_wide_from_long(fwd1_long)
-    bench = U.load_benchmark_ret(WARM_START, END)
+    bench = U.load_benchmark_ret(WARM_START, ALL_END)
 
     # 控制变量（Size/Beta）：一次批量查询
     ctrl_exprs = dict(U.CONTROL_EXPRS)
-    ctrl_all = U.load_long(list(ctrl_exprs.values()), WARM_START, END)
+    ctrl_all = U.load_long(list(ctrl_exprs.values()), WARM_START, ALL_END)
     ctrl_all.columns = list(ctrl_exprs.keys())
     controls_wide = {c: U.to_wide(ctrl_all[[c]], c) for c in ctrl_exprs}
 
     # 行业标签（可选）
-    ind_wide = U.load_industry_wide(INDUSTRY_CSV, WARM_START, END)
+    ind_wide = U.load_industry_wide(INDUSTRY_CSV, WARM_START, ALL_END)
     log.info("  行业标签：" + ("已加载" if ind_wide is not None else "无（行业中性化 N/A）"))
     log.info(f"  主区间: {START} ~ {END}，交易日={len(fwd1_wide)}，股票={fwd1_wide.shape[1]}")
 
     meta = pd.DataFrame([{
         "n_factors_total": len(all_names), "n_factors_used": len(names),
-        "start": START, "end": END, "warm_start": WARM_START,
+        "start": START, "end": END, "all_end": ALL_END, "warm_start": WARM_START,
+        "neut_window": f"{START}~{ALL_END}", "ic_window": f"{START}~{END}",
         "neutralize": NEUTRALIZE, "neutral_mode": NEUTRAL_MODE if NEUTRALIZE else "none",
         "n_groups": N_GROUPS, "primary_h": PRIMARY_H,
     }])
@@ -218,7 +362,19 @@ def step0_load(names):
     save_csv(clip_long(fwd1_long).reset_index(), "raw_fwd1.csv")
     bench.to_frame().to_csv(os.path.join(RESULTS, "raw_benchmark_ret.csv"))
 
-    return (names, factor_long, fwd1_long, fwd1_wide, bench, controls_wide, ind_wide)
+    # 额外因子（未来收益中性化 + 行业标签）：保存但不进入 IC 估计
+    log.info("=" * 70)
+    log.info("Step 0.5 | 构造额外因子（NFWD1/3/5 中性化 + 行业标签，不进 IC）")
+    extra_long = build_extra_factors(fwd1_wide, controls_wide, ind_wide,
+                                     snap_dates, members_by_snap)
+    # 额外因子仅保留 [START, ALL_END]（中性化窗口），避免把预热期也落盘
+    extra_long = extra_long.loc[START:ALL_END]
+    save_pickle(extra_long, EXTRA_PKL_NAME)
+    save_csv(clip_long(extra_long).reset_index(), "extra_factors.csv")
+    log.info(f"  额外因子列: {list(extra_long.columns)}，"
+             f"{extra_long.shape}，主区间切片 {START} ~ {END}")
+
+    return (names, factor_long, fwd1_long, fwd1_wide, bench, controls_wide, ind_wide, extra_long)
 
 
 # ----------------------------------------------------------------------------
@@ -515,15 +671,26 @@ def main():
         names = list(all_names)
 
     (names, factor_long, fwd1_long, fwd1_wide, bench,
-     controls_wide, ind_wide) = step0_load(names)
+     controls_wide, ind_wide, extra_long) = step0_load(names)
 
-    # 主 horizon 的标签（一次构建，全因子复用）
-    label_wide = U.forward_cumprod_ret(fwd1_wide, PRIMARY_H)
-    label_long = label_wide.stack().rename("LABEL").reset_index().set_index(
-        ["datetime", "instrument"])
+    # 两个时间窗口：
+    #  * 中性化面板 / 复用 pkl 区间 : [START, ALL_END]（延伸到 END 之后，供样本外复用）
+    #  * IC / IR / 分组 / 绩效估计   区间 : [START, END]（仅主区间，避免样本外泄漏）
+    fwd1_wide_neu = fwd1_wide.loc[START:ALL_END]      # 中性化面板（[START, ALL_END]）
+    fwd1_wide_eval = fwd1_wide.loc[START:END]        # IC 评估面板（[START, END]）
+    # 标签用全量 fwd1 计算（保证 END 附近前向收益不缺失），再切到 [START, END]
+    label_wide_full = U.forward_cumprod_ret(fwd1_wide, PRIMARY_H)
+    label_long_eval = (label_wide_full.loc[START:END].stack().rename("LABEL")
+                       .reset_index().set_index(["datetime", "instrument"]))
+    # IC 的标签改用「中性化后的前向收益」：与因子同源的中性化口径（行业+市值）。
+    # 中性化参考区间与因子一致取 [START, ALL_END]，再切到 [START, END] 作 IC 目标。
+    neu_label_wides = step1_neutral(label_long_eval, fwd1_wide_neu, controls_wide, ind_wide)
+    label_long_eval = (neu_label_wides["LABEL"].loc[START:END].stack().rename("LABEL")
+                       .reset_index().set_index(["datetime", "instrument"]))
 
     log.info("=" * 70)
-    log.info(f"Step 1-3 | 逐批因子：中性化 -> IC -> 分组（共 {len(names)} 个，批大小 {CHUNK}）")
+    log.info(f"Step 1-3 | 中性化区间=[START,{ALL_END}]；IC/分组区间=[{START},{END}] "
+             f"（IC 目标=中性化前向收益；共 {len(names)} 个因子，批大小 {CHUNK}）")
     t0 = time.time()
     rows = []
     rank_ic_map = {}          # {factor: 日度 RankIC 序列}，供 Step 10 聚类复用
@@ -531,12 +698,15 @@ def main():
     for lo in range(0, len(names), CHUNK):
         batch = names[lo:lo + CHUNK]
         sub = factor_long[batch]
-        neu_wides = step1_neutral(sub, fwd1_wide, controls_wide, ind_wide)
+        neu_wides: dict[Any, DataFrame] = step1_neutral(sub, fwd1_wide_neu, controls_wide, ind_wide)
         if SAVE_NEUTRAL_PKL:
             neu_parts.append(_wides_to_long(neu_wides))
         for nm in batch:
             try:
-                row, d_rank = evaluate_factor(nm, neu_wides[nm], label_long, fwd1_wide, PRIMARY_H)
+                # 仅用 [START, END] 切片做 IC / 分组 / 绩效估计（不污染样本外）
+                neu_wide_eval = neu_wides[nm].loc[START:END]
+                row, d_rank = evaluate_factor(
+                    nm, neu_wide_eval, label_long_eval, fwd1_wide_eval, PRIMARY_H)
                 rows.append(row)
                 rank_ic_map[nm] = d_rank
             except Exception as e:
@@ -554,6 +724,11 @@ def main():
         log.info(f"落盘 | 中性化因子 pkl（中性化模式={NEUTRAL_MODE if NEUTRALIZE else '关闭'}）")
         neu_long = pd.concat(neu_parts, axis=1)
         del neu_parts
+        # 并入额外因子（NFWD1/3/5 中性化未来收益 + INDUSTRY 原始行业标签），
+        # 一并落盘到 neutralized_factors.pkl（这些列不进入 IC，仅作数据保存/复用）。
+        if extra_long is not None and len(extra_long.columns):
+            neu_long = pd.concat([neu_long, extra_long], axis=1, join="outer")
+            log.info(f"  已并入额外因子列: {list(extra_long.columns)}")
         dax = neu_long.index.get_level_values(0)
         log.info(f"  {neu_long.shape}，区间 {dax.min().date()} ~ {dax.max().date()}，"
                  f"dtype={neu_long.dtypes.iloc[0]}")

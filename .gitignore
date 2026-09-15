@@ -7,7 +7,6 @@ __pycache__/
 
 # 本地数据 / 实验结果（体积大，不入库）
 IC_mul/mlruns/
-IC_mul/data/
 IC_mul/results/
 
 IC_single/bei/
