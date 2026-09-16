@@ -29,7 +29,7 @@ DatasetH -> Model -> Record），只是全部显式写在代码里。
     - d_feat 必须等于因子通道数 F（自动取选中因子个数），时间窗口长度 n_days 由
       --n-days 控制（默认 20 天）；卷积在时间维，故 TCN 真正在「时序」上建模。
     - 损失：MSE(s, 标签)（标签已被 CSZScoreNorm 截面标准化，与最大化 IC 同解）。
-    - 标签：优先用因子数据里的 `NFWD1`（前 1 日收益率），无则回退 D.features(label_expr)。
+    - 标签：优先用因子数据里的 `NFWD1`（未来 1 日收益率 / forward return，见 run_ic.py 定义），无则回退 D.features(label_expr)。
     - 早停：以验证集 MSE 最小为准（qlib TCN 内部实现）。
 
   训练区间：train = ("2017-01-01", "2023-12-31")，valid / test 见 SEGMENTS，均可用命令行覆盖。
@@ -572,23 +572,31 @@ def build_raw_features(pkl_path: str, segments: dict, market: str = MARKET,
     data_end = max(s[1] for s in segments.values())
     feat = _slice_by_time(feat, data_start, data_end)
 
-    # 守卫：因子必须覆盖到「测试区间终点」，否则评估期无特征 -> 预测退化为常数
-    feat_max = feat.index.get_level_values(0).max()
+    # 守卫：因子必须覆盖「测试区间内的所有交易日」，否则评估期无特征 ->
+    # 预测退化为常数。注意 segment 是左闭右开区间 (start, end]，故需要的最后
+    # 交易日是严格 < test_end 的那个，不能用 test_end 本身去比（否则会误报）。
+    feat_dates = feat.index.get_level_values(0)
+    feat_max = feat_dates.max()
+    test_start = pd.Timestamp(segments["test"][0])
     test_end = pd.Timestamp(segments["test"][1])
-    if feat_max < test_end:
+    test_dates = sorted({d for d in feat_dates.unique() if test_start <= d < test_end})
+    if test_dates and feat_max < max(test_dates):
         raise ValueError(
-            f"因子数据只覆盖到 {feat_max.date()}，但测试区间终点为 {test_end.date()}。"
-            f"评估期没有因子特征，预测会退化为常数（valid/test 的 IC 全为 0 或 nan）。\n"
-            f"请先用 run_ic.py 把因子生成到 {segments['test'][1]} 之后再跑本流程"
-            f"（检查 run_ic.py 的 END 参数，应 >= {segments['test'][1]}）。"
+            f"因子数据只覆盖到 {feat_max.date()}，但测试区间 "
+            f"[{test_start.date()}, {test_end.date()}) 内的最晚交易日为 "
+            f"{max(test_dates).date()}，评估期没有因子特征，预测会退化为常数"
+            f"（valid/test 的 IC 全为 0 或 nan）。\n"
+            f"请先用 run_ic.py 把因子生成到 {max(test_dates).date()} 之后再跑本流程"
+            f"（检查 run_ic.py 的 END 参数，应 >= {max(test_dates).date()}）。"
         )
 
-    # 标签：优先用因子数据里的 NFWD1（前 1 日收益率）；无则回退 D.features(label_expr)。
+    # 标签：优先用因子数据里的 NFWD1（未来 1 日收益率 / forward return，run_ic.py 中定义为
+    # 「未来 1 日累计收益」的中性化残差，与动态窗口 X[≤t]→LABEL0[t] 的前向对齐无泄漏）；无则回退 D.features(label_expr)。
     # 注意：NFWD1 不在 metrics 里，因子筛选(feat=feat[keep])会把它丢掉，
     # 所以必须用筛选前保留的全量副本 nfwd1_all，否则会误判为“无 NFWD1”而回退到 D.features。
     if nfwd1_all is not None:
         label_raw = nfwd1_all.reindex(feat.index).to_frame("LABEL0")
-        log.info("标签来源：因子数据中的 NFWD1 列（前 1 日收益率）")
+        log.info("标签来源：因子数据中的 NFWD1 列（未来 1 日收益率 / forward return）")
     else:
         lab = D.features(
             D.instruments(market), [label_expr],
@@ -835,6 +843,7 @@ def build_port_analysis_config(model, dataset, strategy="tilt",
                                topk=TOPK, n_drop=N_DROP,
                                cost_rate=COST_RATE, bench=BENCHMARK,
                                tilt_alpha=0.1, tilt_base="auto", tilt_topk=None,
+                               tilt_max_dev=0.5,
                                risk_degree=0.95, weight_file=None,
                                weight_dump_path=None,
                                start_time=SEGMENTS["test"][0], end_time=SEGMENTS["test"][1]):
@@ -861,11 +870,12 @@ def build_port_analysis_config(model, dataset, strategy="tilt",
                 "risk_degree": risk_degree,
                 "topk_limit": tilt_topk,
                 "weight_file": weight_file,
+                "max_dev": tilt_max_dev,
             },
         }
         log.info(
             f"回测策略: BenchmarkTiltStrategy(alpha={tilt_alpha}, base={tilt_base}, "
-            f"topk_limit={tilt_topk}, risk_degree={risk_degree})"
+            f"topk_limit={tilt_topk}, max_dev={tilt_max_dev}, risk_degree={risk_degree})"
         )
     elif strategy == "hold":
         strategy_cfg = {
@@ -1209,6 +1219,16 @@ def _seg(text: str):
     return (s, e)
 
 
+def _nullable_int(text: str):
+    """命令行可空的 int：'none'/'null'/''/-1 都解析为 None。"""
+    if text is None:
+        return None
+    t = str(text).strip().lower()
+    if t in ("", "none", "null", "nan", "-1", "0"):
+        return None
+    return int(t)
+
+
 def parse_args():
     p = argparse.ArgumentParser("qlib TCN workflow on neutralized Alpha158 factors")
     p.add_argument("--pkl", default=NEUTRAL_PKL, help="中性化因子 pkl（run_ic.py 产物）")
@@ -1242,17 +1262,21 @@ def parse_args():
     # ---- 回测 ----
     p.add_argument("--topk", type=int, default=TOPK)
     p.add_argument("--n-drop", type=int, default=N_DROP)
-    p.add_argument("--strategy", default="topk", choices=["tilt", "topk", "hold"],
+    p.add_argument("--strategy", default="tilt", choices=["tilt", "topk", "hold"],
                    help="回测策略：tilt=在基准权重上按 pred 倾斜（默认，不用 TopkDropoutStrategy）；"
                         "topk=原 TopkDropoutStrategy（仅对照）；"
                         "hold=直接按权重表被动持仓（复制指数基准对照）")
     p.add_argument("--tilt-alpha", type=float, default=0.1,
-                   help="基准倾斜强度 alpha：w_i = base_w_i * exp(alpha * zscore(pred_i))")
+                   help="基准倾斜强度 alpha：w_i = base_w_i * exp(alpha * zscore(pred_i))；"
+                        "指数增强建议 0.05~0.20")
     p.add_argument("--tilt-base", default="auto", choices=["auto", "equal", "index"],
                    help="基准权重来源：auto=有真实指数权重则用否则等权；equal=强制等权；"
                         "index=强制真实指数权重 $csi300_weight")
-    p.add_argument("--tilt-topk", type=int, default=None,
-                   help="倾斜后最多持有前 N 只票（None=不限制，持有全部基准成分）")
+    p.add_argument("--tilt-topk", type=_nullable_int, default=None,
+                   help="只保留 pred 最高的前 N 只基准成分股（写 None=不限制，持有全部基准成分，"
+                        "指数增强推荐）。注意：与 --tilt-max-dev 互斥，二者同时给会直接报错")
+    p.add_argument("--tilt-max-dev", type=float, default=0.5,
+                   help="单票相对基准权重的最大偏离（0.5=±50%%）；0 或负数表示不约束")
     p.add_argument("--risk-degree", type=float, default=0.95,
                    help="风险预算（投到股票的比例），默认 0.95")
     p.add_argument("--hs300-weight-file", default=DEFAULT_WEIGHT_FILE,
@@ -1367,7 +1391,8 @@ def main():
         model, dataset, strategy=args.strategy,
         topk=args.topk, n_drop=args.n_drop, cost_rate=args.cost,
         tilt_alpha=args.tilt_alpha, tilt_base=args.tilt_base,
-        tilt_topk=args.tilt_topk, risk_degree=args.risk_degree,
+        tilt_topk=args.tilt_topk, tilt_max_dev=args.tilt_max_dev,
+        risk_degree=args.risk_degree,
         weight_file=args.hs300_weight_file,
         weight_dump_path=os.path.join(
             HERE, "results", "workflow_figs", args.experiment, "hold_weights.csv"
@@ -1407,6 +1432,7 @@ def main():
                 "tilt_alpha": args.tilt_alpha,
                 "tilt_base": args.tilt_base,
                 "tilt_topk": args.tilt_topk,
+                "tilt_max_dev": args.tilt_max_dev,
                 "risk_degree": args.risk_degree,
                 "n_drop": args.n_drop,
                 "skip_train": args.skip_train,
@@ -1439,7 +1465,7 @@ def main():
                     "skip-train(dynamic)：用 test 段样本索引造常数假 pred.pkl 驱动回测框架"
                     "（hold 忽略信号值；tilt 退化为纯基准权重）。"
                 )
-                _, te_idx = _segment_windows(feat_raw, label_raw, segments["test"], args.n_days)
+                _, _, te_idx = _segment_windows(feat_raw, label_raw, segments["test"], args.n_days)
                 dummy_pred = pd.DataFrame(0.0, index=te_idx, columns=["score"])
                 dummy_label = pd.DataFrame(0.0, index=te_idx, columns=["LABEL0"])
                 R.save_objects(**{"pred.pkl": dummy_pred, "label.pkl": dummy_label})

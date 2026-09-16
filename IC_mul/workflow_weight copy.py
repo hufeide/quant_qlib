@@ -67,24 +67,11 @@ DatasetH -> Model -> Record），只是全部显式写在代码里。
   --topk 50 --n-drop 5            回测组合参数
   --baseline                     纯 LGB 基线模式（去掉成本目标，隔离模型 vs 数据）
   --check-pkl                    只检查中性化因子 pkl 的 NaN/常数/近常数/高冗余，然后退出
-
-权重复用（保存 → 加载 → 直接 predict）：
-  --save-weight [路径]   训练后保存 <路径>.txt（LightGBM 原生模型，只保留 best_iteration 棵树）
-                         + <路径>_meta.json（模型类 / loss / 因子列表 / 成本参数 / 训练区间 /
-                           因子文件 sha256 等）。不带值默认 results/model_weights/<experiment>.txt。
-  --load-weight 路径     跳过 fit，直接用权重 predict / IC / 回测。加载后依次校验：
-                           1) meta 的树数 / 因子数 / 因子顺序 == .txt 实际内容
-                           2) 当前因子文件的 sha256 == 训练时的 sha256（防止同名因子换了版本）
-                           3) 因子能凑齐；predict 时按训练顺序自动重排，缺因子直接报错
-  --no-factor-check      因子文件 hash 不一致时降级为告警（确认过确实要跨版本用再加）
-  --predict-only         只出 pred / IC，跳过组合回测；--pred-out 可把 pred 导成 CSV
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import logging
 import os
 import sys
@@ -128,9 +115,9 @@ PROVIDER_URI = "/home/fei/.qlib/qlib_data/cn_data"           # qlib 二进制数
 MLFLOW_URI = "sqlite:////home/fei/workspace/mlflow.db"       # 避免 mlruns 文件后端
 
 # 中性化因子（run_ic.py 的产物）
-NEUTRAL_PKL = os.path.join(HERE, "results", "alpha158_all", "neutralized_factors.pkl")
+NEUTRAL_PKL = os.path.join(HERE, "results", "alpha158_all_no", "neutralized_factors.pkl")
 # 因子指标表（run_ic.py 产物：含「因子类别」「Rank IC」等列，用于按类别筛选）
-METRICS_CSV = os.path.join(HERE, "results", "alpha158_all", "alpha158_factor_metrics.csv")
+METRICS_CSV = os.path.join(HERE, "results", "alpha158_all_no", "alpha158_factor_metrics.csv")
 # 交给 qlib DataLoader 读取的中间文件（因子/标签按 segment 区间切片后落盘）
 WORK_DIR = os.path.join(HERE, "results", "qlib_data")
 
@@ -167,9 +154,6 @@ LGB_PARAMS = {
     "num_leaves": 210,
     "num_threads": NUM_THREADS,
 }
-
-# 模型权重落盘目录（--save-weight 不带值时的默认位置）
-MODEL_DIR = os.path.join(HERE, "results", "model_weights")
 
 log = get_module_logger("cost_aware_lgb", logging.INFO)
 
@@ -305,63 +289,9 @@ def _make_cost_aware_objective(day_code, day_size, prev_row, cost_coef,
 
 
 # ---------------------------------------------------------------------------
-# 特征对齐：predict 前把 dataset 的因子列对齐到「训练（或权重文件）里保存的顺序」
-# ---------------------------------------------------------------------------
-def _align_feature_columns(booster, x: pd.DataFrame) -> pd.DataFrame:
-    """按 booster 的 feature_name 重排 x 的列。
-
-    LightGBM 的 Booster.predict 只看 **列的顺序**（底层吃的是 numpy），不看列名，
-    因此加载权重后如果 dataset 的因子顺序/集合与训练时不一致，会得到静默的错误预测。
-    这里显式对齐：顺序不同 -> 自动重排；缺因子 -> 直接报错。
-
-    booster 没有 feature_name（或列数对不上）时不处理，交回 LightGBM 自己报错。
-    """
-    try:
-        trained = list(booster.feature_name())
-    except Exception:  # noqa: BLE001
-        return x
-    if not trained:
-        return x
-    cur = [str(c) for c in x.columns]
-    if cur == trained:
-        return x
-    cur_set = set(cur)
-    missing = [c for c in trained if c not in cur_set]
-    if missing:
-        raise ValueError(
-            f"权重需要 {len(trained)} 个因子，但 dataset 缺少 {len(missing)} 个：{missing[:10]}"
-            f"（共 {len(missing)} 个）。请检查 --pkl / 因子筛选参数是否与训练时一致。"
-        )
-    extra = [c for c in cur if c not in trained]
-    log.warning(
-        f"dataset 因子列与训练时不一致：按训练顺序重排"
-        f"（多余 {len(extra)} 列将被丢弃：{extra[:10]}）"
-    )
-    return x[trained]
-
-
-class _AlignedPredictMixin:
-    """给 LGBModel 加上「predict 时对齐因子列」的能力（加载权重后必须）。"""
-
-    # 由 LGBModel.__init__ 或 load_model_weights 赋值的实例属性（这里只是类型/默认值提示）
-    model = None
-    _weight_meta: dict = {}
-    _loaded_from = None
-
-    def predict(self, dataset, segment: "str | slice" = "test"):
-        if getattr(self, "model", None) is None:
-            raise ValueError("model is not fitted yet!")
-        x_test = _align_feature_columns(
-            self.model,
-            dataset.prepare(segment, col_set="feature", data_key=DataHandlerLP.DK_I),
-        )
-        return pd.Series(self.model.predict(x_test.values), index=x_test.index)
-
-
-# ---------------------------------------------------------------------------
 # 模型：LightGBM + 换手率成本
 # ---------------------------------------------------------------------------
-class CostAwareLGBModel(_AlignedPredictMixin, LGBModel):
+class CostAwareLGBModel(LGBModel):
     """qlib LGBModel 的成本感知版本（自定义目标，见 _make_cost_aware_objective）。
 
     参数
@@ -393,7 +323,6 @@ class CostAwareLGBModel(_AlignedPredictMixin, LGBModel):
     ):
         if loss != "cost_ic":
             raise NotImplementedError(f"loss={loss} is not supported by CostAwareLGBModel")
-        self.loss = loss          # 供 save_model_weights 写入权重元信息
         self.params = {"objective": "regression", "verbosity": -1, "metric": metric}
         self.params.update(kwargs)
         # 自定义目标下不使用标签均值做初始分数
@@ -551,319 +480,6 @@ class CostAwareLGBModel(_AlignedPredictMixin, LGBModel):
         raise NotImplementedError(
             "CostAwareLGBModel 的目标函数依赖训练集的按日结构，请直接重新 fit，不要 finetune。"
         )
-
-    # -- 权重保存 / 加载（实现在同文件下方的 save_model_weights / load_model_weights）--
-    def save_weights(self, path, extra_meta=None, overwrite=False):
-        return save_model_weights(self, path, extra_meta=extra_meta, overwrite=overwrite)
-
-    @classmethod
-    def load_weights(cls, path, **kwargs):
-        return load_model_weights(path, **kwargs)
-
-
-# ---------------------------------------------------------------------------
-# 权重保存 / 加载（训完一次，之后可以直接拿权重 predict）
-# ---------------------------------------------------------------------------
-BOOSTER_SUFFIXES = {".txt", ".json", ".model"}
-
-
-def _resolve_weight_path(path: str):
-    """把用户给的路径解析成 (booster 文件, meta 文件)。
-
-    允许传：目录（取目录下 lgb_model.txt）/ 任意文件名（后缀不在
-    {.txt,.json,.model} 时自动补 .txt）。meta 与 booster 同名、后缀换成 `_meta.json`。
-    """
-    path = os.path.abspath(os.path.expanduser(path))
-    if os.path.isdir(path) or path.endswith(os.sep):
-        base = os.path.join(path, "lgb_model.txt")
-    else:
-        # 允许直接传 meta 文件路径：xxx_meta.json -> xxx.txt
-        if path.endswith("_meta.json"):
-            path = path[: -len("_meta.json")]
-        _, ext = os.path.splitext(path)
-        base = path if ext.lower() in BOOSTER_SUFFIXES else path + ".txt"
-    return base, os.path.splitext(base)[0] + "_meta.json"
-
-
-def file_sha256(path, chunk_size=1024 * 1024):
-    """文件内容的 sha256，用于把「权重」和「当时用的因子文件」绑定。
-
-    文件不存在时返回 None（调用方自行决定是否当成错误）。
-    """
-    if not path or not os.path.isfile(path):
-        return None
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(chunk_size)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _unique_path(path: str) -> str:
-    """若 path 已存在，追加 _1/_2... 避免覆盖旧权重。"""
-    if not os.path.exists(path):
-        return path
-    root, ext = os.path.splitext(path)
-    i = 1
-    while os.path.exists(f"{root}_{i}{ext}"):
-        i += 1
-    return f"{root}_{i}{ext}"
-
-
-def save_model_weights(model, path, extra_meta=None, overwrite=False):
-    """把模型的 booster + 元信息落盘，之后可用 load_model_weights 直接预测。
-
-    落盘两个文件：
-      <path>.txt         : LightGBM 原生模型（human-readable，跨版本比 pickle 稳）
-      <path>_meta.json   : 恢复模型所需的元信息（模型类、因子列表、成本参数、训练区间...）
-
-    返回 dict(booster=..., meta=...)。
-    """
-    booster = getattr(model, "model", None)
-    if booster is None:
-        raise ValueError("模型尚未训练/加载（model.model 为空），无法保存权重")
-    booster_path, meta_path = _resolve_weight_path(path)
-    if not overwrite:
-        booster_path = _unique_path(booster_path)
-        meta_path = os.path.splitext(booster_path)[0] + "_meta.json"
-    os.makedirs(os.path.dirname(booster_path) or ".", exist_ok=True)
-
-    # 早停场景下只保留最优迭代，避免把过拟合的树一起存进去。
-    # 注意：save_model(num_iteration=best) 写进 .txt 的是前 best 棵树，
-    # 而内存里的 booster.num_trees() 仍是完整轮数，所以元信息要记录「实际写盘树数」，
-    # 否则 meta["num_trees"] 会比 .txt 里真实的树数大得多（加载时校验会对不上）。
-    best = getattr(booster, "best_iteration", 0) or 0
-    save_iteration = best if best > 0 else None
-    booster.save_model(booster_path, num_iteration=save_iteration)
-    saved_num_trees = int(best) if best > 0 else int(booster.num_trees())
-
-    params = {}
-    for k, v in dict(getattr(model, "params", {}) or {}).items():
-        if isinstance(v, (str, int, float, bool)) or v is None:
-            params[k] = v
-    meta = {
-        "format": "lightgbm-booster+meta",
-        "saved_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "model_class": type(model).__name__,
-        "loss": getattr(model, "loss", None) if hasattr(model, "loss") else None,
-        "params": params,
-        "feature_name": list(booster.feature_name()),
-        "num_features": int(booster.num_feature()),
-        "num_trees": int(saved_num_trees),          # 实际写进 .txt 的树数，不是训练总轮数
-        "total_boost_rounds": int(booster.num_trees()),  # 内存里训练的完整轮数（仅供追溯）
-        "best_iteration": int(best) if best else None,
-        "cost_rate": getattr(model, "cost_rate", None),
-        "turnover_weight": getattr(model, "turnover_weight", None),
-        "ret_scale": getattr(model, "ret_scale", None),
-        "cost_coef": getattr(model, "cost_coef", None),
-    }
-    if isinstance(meta["ret_scale"], float) and not np.isfinite(meta["ret_scale"]):
-        meta["ret_scale"] = None
-    if isinstance(meta["cost_coef"], float) and not np.isfinite(meta["cost_coef"]):
-        meta["cost_coef"] = None
-    if extra_meta:
-        meta.update(extra_meta)
-    meta = {k: v for k, v in meta.items() if v is not None or k in ("loss",)}
-
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-
-    log.info(
-        f"权重已保存：{booster_path}（{os.path.getsize(booster_path) / 1e6:.2f} MB，"
-        f"{meta.get('num_trees')} 棵树，{meta.get('num_features')} 个因子）"
-    )
-    log.info(f"          元信息：{meta_path}")
-    return {"booster": booster_path, "meta": meta_path, "info": meta}
-
-
-class LoadedLGBModel(_AlignedPredictMixin, LGBModel):
-    """从权重文件恢复出来的模型（predict 时会自动对齐因子列顺序）。"""
-
-
-def load_model_weights(path, **kwargs):
-    """从 save_model_weights 落盘的文件恢复模型，可直接用于 predict / 回测。
-
-    可接受 booster 路径（.txt/.json/.model）、meta 路径（*_meta.json）或所在目录。
-    """
-    raw = os.path.abspath(os.path.expanduser(path))
-    is_dir = os.path.isdir(raw) or raw.endswith(os.sep)
-    booster_path, meta_path = _resolve_weight_path(raw)
-    if is_dir and not os.path.exists(booster_path):
-        # 目录里没有 lgb_model.txt 时，退一步取目录下任意一个 booster 文件
-        cands = sorted(
-            f for f in os.listdir(raw)
-            if os.path.splitext(f)[1].lower() in BOOSTER_SUFFIXES
-        )
-        if cands:
-            booster_path = os.path.join(raw, cands[0])
-            meta_path = os.path.splitext(booster_path)[0] + "_meta.json"
-    if not os.path.exists(booster_path):
-        # 容错：同一个 stem 下可能有其它后缀（如存的是 .json 而用户写 .txt）
-        stem = os.path.splitext(booster_path)[0]
-        for cand in (stem + s for s in BOOSTER_SUFFIXES):
-            if os.path.exists(cand):
-                booster_path, meta_path = cand, stem + "_meta.json"
-                break
-    if not os.path.exists(booster_path):
-        raise FileNotFoundError(f"找不到权重文件：{booster_path}（由 --save-weight 生成）")
-
-    meta = {}
-    if os.path.exists(meta_path):
-        with open(meta_path, encoding="utf-8") as f:
-            meta = json.load(f)
-    else:
-        log.warning(f"未找到元信息文件 {meta_path}，只能恢复 booster（成本参数将用默认值）")
-
-    booster = lgb.Booster(model_file=booster_path)
-    if meta.get("model_class") == "CostAwareLGBModel":
-        model = CostAwareLGBModel(
-            cost_rate=meta.get("cost_rate", COST_RATE),
-            turnover_weight=meta.get("turnover_weight", TURNOVER_WEIGHT),
-            **kwargs,
-        )
-        model.ret_scale = meta.get("ret_scale", float("nan"))
-        model.cost_coef = meta.get("cost_coef", float("nan"))
-    else:
-        model = LoadedLGBModel(loss=meta.get("loss") or "mse", **kwargs)
-    model.model = booster
-    model.params.update({k: v for k, v in (meta.get("params") or {}).items()})
-    # 下划线开头的属性不会进 pickle（Serializable 规则），仅供运行时查看
-    model._weight_meta = meta
-    model._loaded_from = booster_path
-
-    log.info(
-        f"已从权重加载模型：{booster_path}\n"
-        f"  模型类={type(model).__name__} 树数={booster.num_trees()} "
-        f"因子数={booster.num_feature()} 最优迭代={meta.get('best_iteration')}\n"
-        f"  cost_rate={meta.get('cost_rate')} turnover_weight={meta.get('turnover_weight')} "
-        f"ret_scale={meta.get('ret_scale')} cost_coef={meta.get('cost_coef')}\n"
-        f"  保存时间={meta.get('saved_at')}"
-    )
-    return model
-
-
-def verify_loaded_weight(model):
-    """加载权重后做完整性校验：meta 记录的内容必须与 .txt 实际内容一致。
-
-    尤其防止「meta 说 1000 棵树、文件里只有 237 棵」这类元信息漂移。
-    """
-    booster = getattr(model, "model", None)
-    if booster is None:
-        raise ValueError("模型尚未训练/加载，无法校验权重")
-    meta = getattr(model, "_weight_meta", {}) or {}
-
-    actual_features = list(booster.feature_name())
-    actual_num_features = int(booster.num_feature())
-    actual_num_trees = int(booster.num_trees())
-
-    if meta.get("num_features") is not None:
-        if actual_num_features != int(meta["num_features"]):
-            raise ValueError(
-                f"权重因子数与 meta 不一致：meta={meta['num_features']}，实际={actual_num_features}"
-            )
-    if meta.get("feature_name"):
-        if actual_features != list(meta["feature_name"]):
-            raise ValueError(
-                "权重 feature_name 与 meta 不一致（可能拿错了 _meta.json）："
-                f"meta={list(meta['feature_name'])[:10]}，实际={actual_features[:10]}"
-            )
-    if meta.get("num_trees") is not None:
-        if actual_num_trees != int(meta["num_trees"]):
-            raise ValueError(
-                f"权重树数与 meta 不一致：meta={meta['num_trees']}，实际={actual_num_trees}"
-            )
-
-    log.info(
-        f"权重完整性校验通过：{actual_num_trees} 棵树 / {actual_num_features} 个因子"
-        + (f"（best_iteration={meta.get('best_iteration')}）" if meta.get("best_iteration") else "")
-    )
-    return True
-
-
-def check_factor_file_hash(model, pkl_path, strict=True):
-    """校验「当前因子文件」是否与训练该权重时用的因子文件完全一致（sha256）。
-
-    只比对特征名是不够的：同名因子如果换了中性化版本 / 重算过，名字完全一样但内容已经变了，
-    模型会正常预测但结果是错的，这种问题最难排查。所以这里用文件 hash 绑定版本。
-
-    strict=False 时不一致只告警不报错（--no-factor-check）。
-    """
-    meta = getattr(model, "_weight_meta", {}) or {}
-    expect = meta.get("factor_sha256")
-    if not expect:
-        log.warning(
-            "权重元信息里没有 factor_sha256（旧权重？），跳过因子文件版本校验；"
-            f"该权重训练时用的因子文件：{meta.get('factor_source')}"
-        )
-        return None
-    actual = file_sha256(pkl_path)
-    if actual is None:
-        raise FileNotFoundError(f"因子文件不存在，无法校验：{pkl_path}")
-
-    same = actual == expect
-    msg = (
-        f"因子文件版本{'一致' if same else '不一致'}：\n"
-        f"  训练时用：{meta.get('factor_source')}  sha256={expect}\n"
-        f"  当前使用：{pkl_path}  sha256={actual}"
-    )
-    if same:
-        log.info(msg)
-        return True
-    msg += (
-        "\n  同名因子的数值可能已变化（如换了中性化版本），用旧权重预测会得到错误结果。"
-        "确认无误可加 --no-factor-check 跳过校验。"
-    )
-    if strict:
-        raise ValueError(msg)
-    log.warning(msg)
-    return False
-
-
-def check_feature_alignment(model, dataset, segments=("train", "valid", "test")):
-    """加载权重后确认：dataset 的因子能凑齐 booster 需要的列（缺失 -> 立即报错）。
-
-    真正的对齐发生在 predict 里（_align_feature_columns），这里只是提前失败，
-    免得跑完数据准备才报错。
-    """
-    booster = getattr(model, "model", None)
-    if booster is None:
-        raise ValueError("模型尚未训练/加载，无法检查因子对齐")
-    try:
-        trained = list(booster.feature_name())
-    except Exception:  # noqa: BLE001
-        return {"checked": [], "n_feature": None}
-    if not trained:
-        return {"checked": [], "n_feature": None}
-
-    trained_set = set(trained)
-    report = {}
-    for seg in segments:
-        if seg not in dataset.segments:
-            continue
-        cols = [str(c) for c in dataset.prepare(seg, col_set="feature").columns]
-        missing = [c for c in trained if c not in cols]
-        report[seg] = {
-            "n_col": len(cols),
-            "missing": missing,
-            "extra": [c for c in cols if c not in trained_set],
-            "ordered": cols == trained,
-        }
-        if missing:
-            raise ValueError(
-                f"segment {seg} 缺少权重所需的 {len(missing)} 个因子：{missing[:10]}"
-                f"（共 {len(missing)} 个）。训练该权重时用了 {len(trained)} 个因子：{trained[:10]}"
-            )
-        if not report[seg]["ordered"]:
-            log.warning(f"segment {seg} 因子顺序与训练时不同，predict 时会自动重排")
-        if report[seg]["extra"]:
-            log.info(
-                f"segment {seg} 有 {len(report[seg]['extra'])} 个权重未使用的因子，"
-                f"predict 时会被忽略"
-            )
-    return {"checked": list(report), "n_feature": len(trained), "detail": report}
 
 
 # ---------------------------------------------------------------------------
@@ -1042,7 +658,7 @@ def build_dataset(pkl_path: str, segments: dict, market: str = MARKET,
         raise ValueError(f"{pkl_path} 内容不是非空 DataFrame")
     if not feat.index.is_monotonic_increasing:
         feat = feat.sort_index()
-    nfwd1_all = feat["NFWD1"].copy() if "NFWD1" in feat.columns else None
+
     # ---- 因子筛选：按「因子类别」分组，每类保留 Rank IC > rank_ic_min 且最高的 topk 个 ----
     if factor_filter and metrics_csv and os.path.exists(metrics_csv):
         selected = select_factors_by_metrics(metrics_csv, rank_ic_min=rank_ic_min, topk=topk)
@@ -1075,19 +691,14 @@ def build_dataset(pkl_path: str, segments: dict, market: str = MARKET,
             f"请先用 run_ic.py 把因子生成到 {segments['test'][1]} 之后再跑本流程"
             f"（检查 run_ic.py 的 END 参数，应 >= {segments['test'][1]}）。"
         )
-    
+
     # 标签：qlib 表达式（与回测/IC 同一套数据）
-    if nfwd1_all is not None:
-        label_raw = nfwd1_all.reindex(feat.index).to_frame("LABEL0")
-        lab = label_raw.reindex(feat.index)
-        log.info("标签来源：因子数据中的 NFWD1 列（未来 1 日收益率 / forward return）")
-    else:
-        lab = D.features(
-            D.instruments(market), [label_expr],
-            start_time=data_start, end_time=data_end, freq="day",
-        )
-        lab.columns = ["LABEL0"]
-        lab = _as_datetime_instrument(lab)
+    lab = D.features(
+        D.instruments(market), [label_expr],
+        start_time=data_start, end_time=data_end, freq="day",
+    )
+    lab.columns = ["LABEL0"]
+    lab = _as_datetime_instrument(lab)
 
     log.info(
         f"中性化因子 {feat.shape}（{feat.index.get_level_values(0).min().date()} ~ "
@@ -1125,7 +736,6 @@ def build_port_analysis_config(model, dataset, strategy="tilt",
                                topk=TOPK, n_drop=N_DROP,
                                cost_rate=COST_RATE, bench=BENCHMARK,
                                tilt_alpha=0.1, tilt_base="auto", tilt_topk=None,
-                               tilt_max_dev=0.5,
                                risk_degree=0.95, weight_file=None,
                                weight_dump_path=None,
                                start_time=SEGMENTS["test"][0], end_time=SEGMENTS["test"][1]):
@@ -1152,12 +762,11 @@ def build_port_analysis_config(model, dataset, strategy="tilt",
                 "risk_degree": risk_degree,
                 "topk_limit": tilt_topk,
                 "weight_file": weight_file,
-                "max_dev": tilt_max_dev,
             },
         }
         log.info(
             f"回测策略: BenchmarkTiltStrategy(alpha={tilt_alpha}, base={tilt_base}, "
-            f"topk_limit={tilt_topk}, max_dev={tilt_max_dev}, risk_degree={risk_degree})"
+            f"topk_limit={tilt_topk}, risk_degree={risk_degree})"
         )
     elif strategy == "hold":
         strategy_cfg = {
@@ -1349,8 +958,6 @@ def save_result_figures(recorder, report: pd.DataFrame, importance: pd.Series,
 
     # ---- 3) 回测净值：组合 vs 基准 + 含/不含成本超额 ----
     try:
-        if report is None:
-            raise ValueError("本次没有跑回测（predict-only），跳过净值图")
         r = report["return"].dropna()
         b = report["bench"].reindex(r.index).fillna(0)
         c = report["cost"].reindex(r.index).fillna(0)
@@ -1388,8 +995,6 @@ def save_result_figures(recorder, report: pd.DataFrame, importance: pd.Series,
 
     # ---- 4) 逐日双边换手率与成本 ----
     try:
-        if report is None:
-            raise ValueError("本次没有跑回测（predict-only），跳过换手/成本图")
         turn = report["turnover"].dropna()
         cost = report["cost"].rename("cost").reindex(turn.index).fillna(0)
         fig, axes = plt.subplots(2, 1, figsize=(15, 8), sharex=True)
@@ -1491,16 +1096,6 @@ def _seg(text: str):
     return (s, e)
 
 
-def _nullable_int(text: str):
-    """命令行可空的 int：'none'/'null'/''/-1 都解析为 None。"""
-    if text is None:
-        return None
-    t = str(text).strip().lower()
-    if t in ("", "none", "null", "nan", "-1", "0"):
-        return None
-    return int(t)
-
-
 def parse_args():
     p = argparse.ArgumentParser("cost-aware LightGBM workflow on neutralized Alpha158 factors")
     p.add_argument("--pkl", default=NEUTRAL_PKL, help="中性化因子 pkl（run_ic.py 产物）")
@@ -1514,21 +1109,17 @@ def parse_args():
     p.add_argument("--early-stop", type=int, default=200, help="早停轮数")
     p.add_argument("--topk", type=int, default=TOPK)
     p.add_argument("--n-drop", type=int, default=N_DROP)
-    p.add_argument("--strategy", default="tilt", choices=["tilt", "topk", "hold"],
+    p.add_argument("--strategy", default="topk", choices=["tilt", "topk", "hold"],
                    help="回测策略：tilt=在基准权重上按 pred 倾斜（默认，不用 TopkDropoutStrategy）；"
                         "topk=原 TopkDropoutStrategy（仅对照）；"
                         "hold=直接按权重表被动持仓（复制指数基准对照）")
     p.add_argument("--tilt-alpha", type=float, default=0.1,
-                   help="基准倾斜强度 alpha：w_i = base_w_i * exp(alpha * zscore(pred_i))；"
-                        "指数增强建议 0.05~0.20")
+                   help="基准倾斜强度 alpha：w_i = base_w_i * exp(alpha * zscore(pred_i))")
     p.add_argument("--tilt-base", default="auto", choices=["auto", "equal", "index"],
                    help="基准权重来源：auto=有真实指数权重则用否则等权；equal=强制等权；"
                         "index=强制真实指数权重 $csi300_weight")
-    p.add_argument("--tilt-topk", type=_nullable_int, default=None,
-                   help="只保留 pred 最高的前 N 只基准成分股（写 None=不限制，持有全部基准成分，"
-                        "指数增强推荐）。注意：与 --tilt-max-dev 互斥，二者同时给会直接报错")
-    p.add_argument("--tilt-max-dev", type=float, default=0.5,
-                   help="单票相对基准权重的最大偏离（0.5=±50%%）；0 或负数表示不约束")
+    p.add_argument("--tilt-topk", type=int, default=None,
+                   help="倾斜后最多持有前 N 只票（None=不限制，持有全部基准成分）")
     p.add_argument("--risk-degree", type=float, default=0.95,
                    help="风险预算（投到股票的比例），默认 0.95")
     p.add_argument("--hs300-weight-file", default=DEFAULT_WEIGHT_FILE,
@@ -1549,20 +1140,6 @@ def parse_args():
                         "不含换手率成本目标，用于隔离『模型 vs 数据』问题")
     p.add_argument("--check-pkl", action="store_true",
                    help="只检查中性化因子 pkl 的 NaN/常数/近常数列与高冗余因子对，检查后退出（不训练）")
-    p.add_argument("--save-weight", nargs="?", const="auto", default=None,
-                   help="训练后保存模型权重：<path>.txt + <path>_meta.json；"
-                        "不带值时用 results/model_weights/<experiment>.txt（已存在则自动加序号）")
-    p.add_argument("--load-weight", default="/home/fei/workspace/qlib/me/IC_mul/results/model_weights/score_tilt_topk_neuo_weight.txt",
-                   help="从已保存的权重加载模型（跳过训练），直接做 predict / IC / 回测；"
-                        "predict 前会按训练时的因子列表自动对齐因子列")
-    p.add_argument("--overwrite-weight", action="store_true",
-                   help="配合 --save-weight：同名权重文件直接覆盖（默认另存为 name_1.txt）")
-    p.add_argument("--predict-only", action="store_true",
-                   help="配合 --load-weight：只出预测与信号分析，跳过组合回测")
-    p.add_argument("--no-factor-check", action="store_true",
-                   help="配合 --load-weight：因子文件 sha256 与训练时不一致时只告警不报错")
-    p.add_argument("--pred-out", default=None,
-                   help="额外把 pred.pkl 导出成 CSV（默认写到 results/workflow_figs/<experiment>/pred.csv）")
     p.add_argument("--skip-train", action="store_true",
                    help="跳过 model.fit 与 SignalRecord：生成常数假 pred.pkl 仅用于驱动回测框架。"
                         "主要配合 --strategy hold（纯指数复制，不浪费训练算力）；"
@@ -1597,28 +1174,9 @@ def main():
         topk=args.factor_topk, factor_filter=not args.no_factor_filter,
     )
     
-    # ---- 2) 模型：新建后训练 / 或从已有权重加载后直接预测 ----
-    loaded_from = None
-    if args.load_weight:
-        if args.skip_train:
-            raise SystemExit(
-                "--load-weight 与 --skip-train 互斥：加载权重就是为了用它做 predict。"
-            )
-        model = load_model_weights(args.load_weight)
-        loaded_from = getattr(model, "_loaded_from", None)
-        model_type = f"loaded_{type(model).__name__}"
-        # 1) 先确认 .txt 内容与 _meta.json 一致（树数 / 因子数 / 因子顺序）
-        verify_loaded_weight(model)
-        # 2) 再确认当前因子文件 == 训练该权重时的因子文件（同名因子换了版本也能查出来）
-        check_factor_file_hash(model, args.pkl, strict=not args.no_factor_check)
-        # 3) 最后确认因子能凑齐（缺失在这里直接报错，避免 predict 拿到静默错位的结果）
-        check_feature_alignment(model, dataset)
-        log.info(
-            f"模型: 从权重加载 {loaded_from} | 本次不训练，直接用该权重在 "
-            f"test {segments['test'][0]} ~ {segments['test'][1]} 上 predict"
-        )
-    elif args.baseline:
-        model_type = "baseline_lgb"
+    # ---- 2) 模型：LightGBM（+ 可选换手率成本目标）----
+    model_type = "baseline_lgb" if args.baseline else "cost_aware"
+    if args.baseline:
         # 纯 LGB 基线：qlib 标准 LGBModel，objective=regression（l2），不含成本项
         model = LGBModel(
             loss="mse",
@@ -1632,7 +1190,6 @@ def main():
             f"成本项未参与训练（仅回测时按双边 {args.cost} 计成本）"
         )
     else:
-        model_type = "cost_aware"
         model = CostAwareLGBModel(
             cost_rate=args.cost,
             turnover_weight=args.turnover_weight,
@@ -1649,8 +1206,7 @@ def main():
         model, dataset, strategy=args.strategy,
         topk=args.topk, n_drop=args.n_drop, cost_rate=args.cost,
         tilt_alpha=args.tilt_alpha, tilt_base=args.tilt_base,
-        tilt_topk=args.tilt_topk, tilt_max_dev=args.tilt_max_dev,
-        risk_degree=args.risk_degree,
+        tilt_topk=args.tilt_topk, risk_degree=args.risk_degree,
         weight_file=args.hs300_weight_file,
         weight_dump_path=os.path.join(
             HERE, "results", "workflow_figs", args.experiment, "hold_weights.csv"
@@ -1679,18 +1235,13 @@ def main():
                 "tilt_alpha": args.tilt_alpha,
                 "tilt_base": args.tilt_base,
                 "tilt_topk": args.tilt_topk,
-                "tilt_max_dev": args.tilt_max_dev,
                 "risk_degree": args.risk_degree,
                 "n_drop": args.n_drop,
                 "skip_train": args.skip_train,
-                "load_weight": args.load_weight or "",
-                "predict_only": args.predict_only,
                 **{f"lgb.{k}": v for k, v in LGB_PARAMS.items()},
             }
         )
         recorder = R.get_recorder()
-        out_dir = os.path.join(HERE, "results", "workflow_figs", args.experiment)
-        os.makedirs(out_dir, exist_ok=True)
 
         if args.skip_train:
             if args.strategy == "topk":
@@ -1709,57 +1260,13 @@ def main():
             R.save_objects(**{"pred.pkl": dummy_pred, "label.pkl": dummy_label})
             importance = None
         else:
-            if loaded_from is None:
-                # 常规路径：训练（从权重加载时跳过 fit）
-                model.fit(dataset)
-
-                # 训练完把权重落盘：booster(.txt) + 元信息(_meta.json)
-                if args.save_weight is not None:
-                    wpath = (
-                        os.path.join(MODEL_DIR, f"{args.experiment}.txt")
-                        if args.save_weight == "auto" else args.save_weight
-                    )
-                    saved = save_model_weights(
-                        model, wpath, overwrite=args.overwrite_weight,
-                        extra_meta={
-                            "experiment": args.experiment,
-                            "train_segment": f"{segments['train'][0]}~{segments['train'][1]}",
-                            "valid_segment": f"{segments['valid'][0]}~{segments['valid'][1]}",
-                            "factor_source": args.pkl,
-                            # 因子文件内容的指纹：加载权重时用来确认「因子没悄悄换过版本」
-                            "factor_sha256": file_sha256(args.pkl),
-                            "label_expr": LABEL_EXPR,
-                            "market": MARKET,
-                            "factor_filter": not args.no_factor_filter,
-                            "metrics_csv": args.metrics,
-                            "rank_ic_min": args.rank_ic_min,
-                        },
-                    )
-                    recorder.save_objects(**{
-                        "lgb_weight_meta.json": json.dumps(
-                            saved["info"], ensure_ascii=False, indent=2
-                        )
-                    })
-                    R.log_params(weight_file=saved["booster"])
+            model.fit(dataset)
             R.save_objects(**{"params.pkl": model})
 
             # 预测 + 标签（供 IC 分析 / 回测）
             SignalRecord(model, dataset, recorder).generate()
             # IC / RankIC / ICIR / 多空收益
             SigAnaRecord(recorder, ana_long_short=True).generate()
-            pred = recorder.load_object("pred.pkl")
-            log.info(
-                f"predict 完成：{len(pred)} 行，"
-                f"{pred.index.get_level_values('datetime').min().date()} ~ "
-                f"{pred.index.get_level_values('datetime').max().date()}"
-            )
-
-            # 预测结果导出 CSV（--pred-out 或 --predict-only 都会导出）
-            if args.pred_out or args.predict_only:
-                pred_csv = args.pred_out or os.path.join(out_dir, "pred.csv")
-                os.makedirs(os.path.dirname(pred_csv) or ".", exist_ok=True)
-                pred.to_csv(pred_csv)
-                log.info(f"预测结果 CSV：{pred_csv}")
 
             # 特征重要性
             importance = pd.Series(
@@ -1770,27 +1277,31 @@ def main():
             print("\nLightGBM 特征重要性 Top 20（gain）")
             print(importance.head(20).to_string())
 
-        if args.predict_only:
-            log.info("--predict-only：跳过组合回测（只保留预测与信号分析结果）")
-            report = None
-        else:
-            # 组合回测（同样的双边成本）—— 两种模式都跑
-            PortAnaRecord(recorder, port_analysis_config, "day").generate()
+        # 组合回测（同样的双边成本）—— 两种模式都跑
+        PortAnaRecord(recorder, port_analysis_config, "day").generate()
 
-            # 换手率 / 成本 / 含成本表现
-            report = recorder.load_object("portfolio_analysis/report_normal_1day.pkl")
-            tables = report_turnover_cost(report, args.cost)
+        # 换手率 / 成本 / 含成本表现
+        report = recorder.load_object("portfolio_analysis/report_normal_1day.pkl")
+        tables = report_turnover_cost(report, args.cost)
 
-            # 把汇总 / 表现表存成 CSV，方便后续对比
-            tables["summary"].to_csv(os.path.join(out_dir, "turnover_cost_summary.csv"), index=False)
-            tables["performance"].to_csv(os.path.join(out_dir, "turnover_cost_performance.csv"), index=False)
-            recorder.save_objects(**{
-                "turnover_cost_summary.csv": tables["summary"].to_csv(index=False),
-                "turnover_cost_performance.csv": tables["performance"].to_csv(index=False),
-            })
+        # 把汇总 / 表现表存成 CSV，方便后续对比
+        tbl_dir = os.path.join(HERE, "results","workflow_figs", args.experiment)
+        os.makedirs(tbl_dir, exist_ok=True)
+        tables["summary"].to_csv(os.path.join(tbl_dir, "turnover_cost_summary.csv"), index=False)
+        tables["performance"].to_csv(os.path.join(tbl_dir, "turnover_cost_performance.csv"), index=False)
+        recorder.save_objects(**{
+            "turnover_cost_summary.csv": tables["summary"].to_csv(index=False),
+            "turnover_cost_performance.csv": tables["performance"].to_csv(index=False),
+        })
 
         # 结果图：IC / 多空 / 回测净值 / 换手成本 / 特征重要性 存到文件夹
-        save_result_figures(recorder, report, importance, args, out_dir)
+        figs_dir = os.path.join(HERE, "results", "workflow_figs", args.experiment)
+        save_result_figures(recorder, report, importance, args, figs_dir)
+        # if importance is not None:
+        #     figs_dir = os.path.join(HERE, "results", "workflow_figs", args.experiment)
+        #     save_result_figures(recorder, report, importance, args, figs_dir)
+        # else:
+        #     log.info("skip-train 模式：跳过含 IC/特征重要性/多空的结果图（无真实信号）。")
 
     log.info(f"全部完成。实验：{args.experiment}（tracking uri: {args.mlflow_uri}）")
 

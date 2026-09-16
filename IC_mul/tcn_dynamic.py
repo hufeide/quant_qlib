@@ -7,8 +7,8 @@
 
 核心省内存点：只保存每个样本的「排序后结尾位置」end_pos([S])，不保存完整
 [S, L] 的 window_rows。Dataset.__getitem__ 再动态切片
-order[p-L+1 : p+1]（排序位置 -> 原始行号）取窗口。内存从 O(S×L) 降到 O(S)
-（约 N*C*4 + S*8 字节），n_days=100、数百万样本也能在小内存机器上跑。
+order[p-L+1 : p+1]（排序位置 -> 原始行号）取窗口。窗口索引部分内存从 O(S×L) 降到 O(S)，
+整体约 N*C*4 + N*4 + S*4 字节，n_days=100、数百万样本也能在小内存机器上跑。
 
 产出的 pred.pkl / label.pkl 与 workflow_tcn 的 qlib 回测完全兼容
 （index=(datetime, instrument)，列 "score" / "LABEL0"）。
@@ -147,8 +147,13 @@ def _make_loader(X, y, order, end_pos, L, batch_size, shuffle):
                       pin_memory=torch.cuda.is_available())
 
 
-def _save_checkpoint(path, model, opt, epoch, best_val, wait):
-    """保存一个检查点：模型权重 + 优化器状态 + epoch + 最佳验证损失 + 早停耐心计数。"""
+def _save_checkpoint(path, model, opt, epoch, best_val, wait,
+                     best_state=None, best_epoch=None):
+    """保存一个检查点：模型权重 + 优化器状态 + 当前 epoch + 最佳验证损失/权重/epoch + 早停耐心计数。
+
+    best_state 保存的是「历史验证最优」的模型权重（而非 checkpoint 当时的模型），
+    这样 resume 后可以正确恢复历史最佳，而不是退化为该 checkpoint 时刻的模型。
+    """
     torch.save(
         {
             "epoch": int(epoch),
@@ -156,6 +161,8 @@ def _save_checkpoint(path, model, opt, epoch, best_val, wait):
             "optimizer": opt.state_dict() if opt is not None else None,
             "best_val": float(best_val),
             "wait": int(wait),
+            "best_state": best_state,
+            "best_epoch": best_epoch,
         },
         path,
     )
@@ -220,8 +227,14 @@ def predict_from_weights(feat_raw, label_raw, n_feat, args, segments, weights_pa
     """
     prep = _prepare_common(feat_raw, label_raw, n_feat, args, segments)
     model, device, use_cuda = prep["model"], prep["device"], prep["use_cuda"]
-    _load_checkpoint(weights_path, model, None, device)
-    log.info(f"[dynamic] 已加载权重：{weights_path}，直接对测试段推理（不训练）")
+    ckpt = _load_checkpoint(weights_path, model, None, device)
+    # 优先用历史验证最优权重做推理（与训练结束时使用的权重一致）；老格式无 best_state 则沿用加载的模型
+    best_state = ckpt.get("best_state")
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    log.info(f"[dynamic] 已加载权重：{weights_path}"
+             + (f"（使用 best_epoch={int(ckpt.get('best_epoch', -1))} 的最优权重）" if best_state is not None else "")
+             + "，直接对测试段推理（不训练）")
 
     te_loader = _make_loader(prep["X"], prep["y"], prep["te_order"], prep["te_pos"],
                              prep["L"], args.batch_size, shuffle=False)
@@ -273,22 +286,37 @@ def train_dynamic(feat_raw, label_raw, n_feat, args, segments):
     criterion = nn.MSELoss()
 
     # 继续训练：从已保存的检查点恢复（模型权重 + 优化器状态 + 早停历史）
-    start_epoch, best_val, wait, best_state = 1, float("inf"), 0, None
+    start_epoch, best_val, wait, best_state, best_epoch = 1, float("inf"), 0, None, 0
     resume_from = getattr(args, "resume_from", None)
     if resume_from:
         ckpt = _load_checkpoint(resume_from, model, opt, device)
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         best_val = float(ckpt.get("best_val", best_val))
         wait = int(ckpt.get("wait", 0))
-        best_state = {k: v.detach().cpu().clone() for k, v in ckpt["model"].items()}
+        # 优先恢复「历史验证最优」权重；老 checkpoint 没存 best_state 时退化为该时刻模型
+        best_state = ckpt.get("best_state")
+        if best_state is not None:
+            best_state = {k: v.clone() for k, v in best_state.items()}
+        else:
+            best_state = {k: v.detach().cpu().clone() for k, v in ckpt["model"].items()}
+        best_epoch = int(ckpt.get("best_epoch", ckpt.get("epoch", 0)))
         log.info(f"[dynamic] 从检查点恢复训练：{resume_from}（起点 epoch={start_epoch}，"
-                 f"best_val={best_val:.6f}）")
+                 f"历史最佳 epoch={best_epoch}，best_val={best_val:.6f}）")
+        if start_epoch > args.rounds:
+            log.warning(
+                f"[dynamic] 续训跳过：检查点已完成 epoch={start_epoch-1}，"
+                f"但 --rounds={args.rounds} <= 该值，训练循环为空（不会继续训练，仅加载最佳权重做推理）。"
+                f"若想继续训练，请把 --rounds 设为大于 {start_epoch-1} 的值"
+                f"（例如 --rounds {start_epoch + args.rounds - 1} 表示再训 {args.rounds} 个 epoch）。"
+            )
 
     tr_loader = _make_loader(X, y, tr_order, tr_pos, L, args.batch_size, shuffle=True)
     va_loader = _make_loader(X, y, va_order, va_pos, L, args.batch_size, shuffle=False)
 
+    last_epoch = start_epoch - 1
     epoch_bar = trange(start_epoch, args.rounds + 1, desc="train")
     for epoch in epoch_bar:
+        last_epoch = epoch
         model.train()
         tr_loss = 0.0
         tr_pbar = tqdm(tr_loader, desc=f"epoch {epoch:03d} train", leave=False, unit="batch")
@@ -304,20 +332,23 @@ def train_dynamic(feat_raw, label_raw, n_feat, args, segments):
         tr_loss /= max(1, len(tr_pos))
 
         model.eval()
-        va_loss = 0.0
+        va_loss, va_seen = 0.0, 0
         va_pbar = tqdm(va_loader, desc=f"epoch {epoch:03d} valid", leave=False, unit="batch")
         with torch.no_grad():
             for xb, yb in va_pbar:
                 xb = xb.to(device, non_blocking=use_cuda)
                 yb = yb.to(device, non_blocking=use_cuda)
-                va_loss += criterion(model(xb), yb).item() * len(yb)
-                va_pbar.set_postfix(loss=f"{va_loss / max(1, va_pbar.n):.6f}")
+                n = len(yb)
+                va_loss += criterion(model(xb), yb).item() * n
+                va_seen += n
+                va_pbar.set_postfix(loss=f"{va_loss / max(1, va_seen):.6f}")
         va_loss /= max(1, len(va_pos))
 
         log.info(f"[dynamic] epoch {epoch:03d} | train_mse={tr_loss:.6f} valid_mse={va_loss:.6f}")
         epoch_bar.set_postfix(tr_mse=f"{tr_loss:.6f}", va_mse=f"{va_loss:.6f}")
         if va_loss < best_val - 1e-8:
-            best_val, wait, best_state = va_loss, 0, {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_val, wait, best_epoch = va_loss, 0, epoch
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         else:
             wait += 1
             if wait >= args.early_stop:
@@ -330,12 +361,13 @@ def train_dynamic(feat_raw, label_raw, n_feat, args, segments):
         if save_every and weights_dir and (epoch % save_every == 0):
             os.makedirs(weights_dir, exist_ok=True)
             ckpt_path = os.path.join(weights_dir, f"tcn_weights_epoch_{epoch:03d}.pt")
-            _save_checkpoint(ckpt_path, model, opt, epoch, best_val, wait)
+            _save_checkpoint(ckpt_path, model, opt, epoch, best_val, wait,
+                            best_state=best_state, best_epoch=best_epoch)
             log.info(f"[dynamic] 检查点已保存：{ckpt_path}")
 
     if best_state is not None:
         model.load_state_dict(best_state)
-        log.info(f"[dynamic] 载入最佳验证权重（valid_mse={best_val:.6f}）")
+        log.info(f"[dynamic] 载入最佳验证权重（best_epoch={best_epoch}，valid_mse={best_val:.6f}）")
 
     # 训练结束后保存最终检查点，便于后续随时加载做推理 / 继续训练
     weights_dir = getattr(args, "weights_dir", None)
@@ -343,7 +375,8 @@ def train_dynamic(feat_raw, label_raw, n_feat, args, segments):
         os.makedirs(weights_dir, exist_ok=True)
         _save_checkpoint(
             os.path.join(weights_dir, "tcn_weights_last.pt"),
-            model, opt, args.rounds, best_val, wait,
+            model, opt, last_epoch, best_val, wait,
+            best_state=best_state, best_epoch=best_epoch,
         )
         log.info(f"[dynamic] 最终检查点已保存："
                  f"{os.path.join(weights_dir, 'tcn_weights_last.pt')}")
