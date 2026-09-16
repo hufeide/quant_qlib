@@ -79,6 +79,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 import qlib
+import torch  # 显式导入：用于把验证集最优模型落盘到 .pt
 from qlib.constant import REG_CN
 from qlib.data import D
 from qlib.data.dataset import DatasetH
@@ -1474,6 +1475,14 @@ def main():
                     feat_raw, label_raw, n_feat, args, segments
                 )
                 model = dyn_model
+                # 显式把验证集最优模型落盘到 weights_dir（train_dynamic 内部已按验证集 MSE 最小
+                # 记录 best_state 并加载回 dyn_model，这里的 pred/label 也是用最优权重算的）。
+                # 命名用 tcn_best_model.pt 直观表达"最优"，与 qlib 后端一致；
+                # 注意 train_dynamic 另存的 tcn_weights_last.pt 也含 best_state，可任选其一加载。
+                os.makedirs(args.weights_dir, exist_ok=True)
+                best_path = os.path.join(args.weights_dir, "tcn_best_model.pt")
+                torch.save(dyn_model, best_path)
+                log.info(f"验证集最优模型已保存到：{best_path}")
                 R.save_objects(**{"pred.pkl": pred_df, "label.pkl": label_df, "params.pkl": dyn_model})
                 # IC / RankIC / ICIR / 多空收益
                 SigAnaRecord(recorder, ana_long_short=True).generate()
@@ -1495,7 +1504,18 @@ def main():
             R.save_objects(**{"pred.pkl": dummy_pred, "label.pkl": dummy_label})
             importance = None
         else:
-            model.fit(dataset)
+            os.makedirs(args.weights_dir, exist_ok=True)
+            best_path = os.path.join(args.weights_dir, "tcn_best_model.pt")
+            # 关键修复：显式把验证集最优权重落盘到 weights_dir。
+            # qlib 自带 TCN 的 fit 内部以验证集 score（默认 -MSE，越大越优）最大化为准早停，
+            # 并在早停/训练结束后把 best_param 加载回模型、torch.save 到 save_path。
+            # 若不传 save_path，它会落到 get_or_create_path(None) 生成的默认隐藏目录，
+            # 导致"没有保存 best 模型"的错觉。这里明确指定到 weights_dir 下。
+            model.fit(dataset, save_path=best_path)
+            log.info(
+                f"验证集最优模型已保存到：{best_path}"
+                f"（params.pkl 同步保存于本次 experiment 记录，可用于 R.load_object 恢复）"
+            )
             R.save_objects(**{"params.pkl": model})
 
             # 预测 + 标签（供 IC 分析 / 回测）
